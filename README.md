@@ -188,6 +188,29 @@ be external: closing a pane makes herdr SIGKILL the pane's whole process group,
 which no shell trap can intercept, so a watcher cannot clean up after itself in
 that case.
 
+### When the watcher loses herdr
+
+A watcher whose `report-agent` calls are failing logs to the same file and to the
+pane's stderr **without** `FREEBUFF_DEBUG`, because a watcher that cannot reach
+herdr is indistinguishable from a pane with no plugin installed:
+
+```
+<plugin state dir>/watcher-<pane_id>.log
+2026-01-01T00:00:00Z report-agent FAILED state=working (1/5 consecutive)
+2026-01-01T00:00:07Z giving up on pane w1:p3: 5 consecutive report-agent failures. Watcher will exit so the startup hook re-attaches it against the new server.
+```
+
+After `FREEBUFF_REPORT_FAILURE_LIMIT` consecutive failures (default 5) the
+watcher exits. It holds a pane's worth of dead state and a stale seq counter by
+then, and the only thing that can fix it is exiting so the startup hook
+re-attaches a fresh watcher against the new server. On the way out it clears its
+own seq file and pidfile, which is what lets the sweep treat the pane as
+unwatched.
+
+The watcher also re-reports an unchanged state every `FREEBUFF_HEARTBEAT_POLLS`
+polls (default 30, roughly 21s). Without that heartbeat a pane sitting idle
+against a dead server would never attempt a report, and so would never notice.
+
 ## Files
 
 | File | Role |

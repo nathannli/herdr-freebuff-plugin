@@ -107,6 +107,34 @@ The fake freebuff pid in that test must be a process that actually exists. With 
 nonexistent pid the spawned watcher exits immediately and cleans up its own
 pidfile, which reads as "attach failed" rather than "target already gone".
 
+## Losing herdr
+Every herdr call in the watcher ends in `>/dev/null 2>&1`, which is what let a
+watcher talking to a dead server look exactly like a pane with no plugin
+installed: no output, no exit, no state change. The watcher now counts
+consecutive `report-agent` failures, writes them to the debug log and stderr
+*without* `FREEBUFF_DEBUG`, and exits at the limit so the startup hook re-attaches
+it. The counter resets on the first success, so a single blip is survivable.
+
+The heartbeat exists because of a subtlety in that counter: it only advances when
+a report is attempted, and reports were only attempted on a *state change*. A
+pane sitting idle against a dead server would never change state, never report,
+and never discover the server was gone — the exact case the counter was added to
+catch. `tests/report-fail.test.sh` asserts both halves: it fails on the old
+code, where the watcher neither logs nor exits and leaves its seq file and
+pidfile behind.
+
+`report()` calls `next_seq` inside the `if` condition, so a failed report still
+consumes a seq number. That is harmless: herdr only requires the seq to increase,
+and burning a number keeps the next attempt monotonic.
+
+## Test-process hygiene
+A suite that spawns background processes must reap only its own. A bare `wait`
+blocks on anything else the runner left running, and a fake process that
+outlives the suite holds the inherited stdout open, hanging the caller on a pipe
+nothing writes to. `tests/report-fail.test.sh` tracks its fakes in `LIVE_FAKES`
+and tears down at the start of each `setup_watcher`, since it calls setup more
+than once.
+
 ## Signal handling
 Closing a pane makes herdr tear down the pane's whole process group down with
 SIGKILL. No shell trap intercepts that, so the watcher cannot clean up after
@@ -125,6 +153,10 @@ The herdr stub accepts flags real herdr rejects. `herdr pane get` takes no
 passed against a code path that could not work in production. `pane_project_slug`
 now has a test asserting the exact argv reaches the stub, by grepping the stub
 call log for the forbidden flag.
+
+`HERDR_STUB_FAIL_REPORT=1` makes `pane report-agent` exit nonzero, modelling a
+server that is gone. Without it the stub always succeeds and no test can observe
+what the watcher does when reporting fails.
 
 ## `done` test limitation
 When the watcher reports `idle` after a completed turn, herdr should render this
