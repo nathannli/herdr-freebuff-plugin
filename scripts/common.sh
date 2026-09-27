@@ -126,12 +126,14 @@ prune_orphan_state() {
   live_panes=$(live_pane_ids)
   [ -n "$live_panes" ] || return 0
 
-  for state_file in "$state_dir"/seq-* "$state_dir"/watch-*.pid "$state_dir"/owned-*; do
+  for state_file in "$state_dir"/seq-* "$state_dir"/watch-*.pid \
+                    "$state_dir"/owned-* "$state_dir"/adopted-*; do
     [ -f "$state_file" ] || continue
     base=$(basename "$state_file")
     pane_id="${base#seq-}"
     pane_id="${pane_id#watch-}"
     pane_id="${pane_id#owned-}"
+    pane_id="${pane_id#adopted-}"
     pane_id="${pane_id%.pid}"
     pane_is_live "$live_panes" "$pane_id" || rm -f "$state_file" 2>/dev/null
   done

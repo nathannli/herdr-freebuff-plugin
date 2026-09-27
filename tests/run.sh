@@ -11,6 +11,10 @@ export HERDR_PANE_ID="test-pane-1"
 export HERDR_SOCKET_PATH="${TMPDIR:-/tmp}/herdr-test-fake.sock"
 export HERDR_STUB_LAST=/tmp/herdr-stub-last.txt
 export HERDR_CALL_LOG=/tmp/herdr-stub-call-log.txt
+# The sweep daemon is long-lived and inherits this environment. Without this the
+# suite would start a real daemon that outlives the run and keeps sweeping with
+# a stale stub pane list, deleting state files other suites are asserting on.
+export FREEBUFF_NO_DAEMON=1
 
 # Reset stub state
 : > "$HERDR_CALL_LOG"

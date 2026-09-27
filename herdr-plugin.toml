@@ -2,7 +2,7 @@ id = "freebuff.integration"
 name = "Freebuff"
 version = "0.2.0"
 min_herdr_version = "0.9.1"
-description = "Launch and manage Freebuff agents inside Herdr, with session restore and lifecycle state."
+description = "Launch and manage Freebuff agents inside Herdr, with session restore, adoption of manually started sessions, and lifecycle state."
 # The scripts are POSIX sh and require node. No Windows support.
 platforms = ["linux", "macos"]
 
@@ -11,12 +11,16 @@ platforms = ["linux", "macos"]
 # none and cannot launch interactive agents). Bind these in your herdr config:
 #   [[keys.command]]
 #   key = "prefix+f"
-#   type = "plugin_pane"
-#   command = "freebuff.integration.task"
+#   type = "shell"
+#   command = "herdr plugin pane open --plugin freebuff.integration --entrypoint task"
 #   description = "Freebuff: new task"
+#
+# There is no `plugin_pane` key type in herdr 0.9.1; reload-config rejects it.
 
-# One-shot init after a server restart: re-attach watchers to surviving freebuff
-# panes and sweep state for panes that are gone.
+# Runs at server start and after a restore: sweeps state for panes that are
+# gone, re-attaches watchers to surviving freebuff panes, adopts panes running a
+# freebuff the user started by hand, and starts the periodic sweep daemon that
+# keeps doing all three (herdr 0.9.1 has no way to hook pane creation).
 [[startup]]
 command = ["sh", "scripts/prune-state.sh"]
 
