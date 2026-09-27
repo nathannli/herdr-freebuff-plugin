@@ -11,23 +11,45 @@ Herdr's state vocabulary (confirmed via schema):
 The plugin never reports `done` via `pane.report-agent` (that RPC only accepts
 `idle|working|blocked|unknown`). Instead, it reports `idle` when a turn finishes,
 and herdr internally renders the `done` state (green checkmark) during the
-`working -> idle` transition. This matches the opencode and commandcode reference
-integrations.
+`working -> idle` transition.
+
+## Reporting contract under test
+- Source id is `custom:freebuff`; the e2e suite asserts it, because a source
+  change silently orphans the pane's lifecycle authority.
+- `pane release-agent` on watcher exit is asserted, along with removal of the
+  per-pane seq file. Without the release, a pane keeps its last reported state
+  after freebuff dies.
+- `can_report` gates every spawn: `HERDR_ENV=1`, `HERDR_PANE_ID` and
+  `HERDR_SOCKET_PATH` must all be present. `tests/run.sh` exports a fake socket
+  path so the guard matches a real managed pane; the herdr stub never connects
+  to it.
 
 ## How Herdr renders the 5 states (observed via schema + opencode plugin)
 - `working`  -> orange/yellow filled dot
-- `done`     -> green unfilled dot  
+- `done`     -> green unfilled dot
 - `blocked`  -> filled dot glyph
 - `idle`     -> minimal/empty
 - `unknown`  -> red marker
 
-The `label()` call (`report-metadata --display-agent freebuff`) must run once at
-watcher startup, or the space/tab surface shows red `unknown` dot.
+The `label()` call (`report-metadata --display-agent freebuff`) runs once at
+watcher startup. It is display-only and never carries lifecycle authority.
+
+## Detection buffer, not viewport
+`detect_screen_state` reads `--source detection`, herdr's live bottom-buffer
+snapshot. `--source visible` is the scrolled viewport and misses content the
+agent has scrolled past. The herdr stub serves the same fixture content for any
+`--source`, so the distinction is not exercised by the stub; it is a contract
+choice, not a tested behaviour.
+
+`herdr agent explain` returns `agent_explain_unavailable` for these panes. That
+is expected, not a failure: there is no *detected* agent to explain, because the
+plugin ships no agent-detection override. The lifecycle source is authoritative.
 
 ## File-polling approach (not hooks)
 Freebuff has no hook system. This plugin polls files at
 `~/.config/manicode/projects/<slug>/chats/<timestamp>/`. The polling interval is
-0.7s, which means state changes are reported within ~1s of happening.
+0.7s, falling back to 1s where fractional `sleep` is unsupported, which means
+state changes are reported within ~1s of happening.
 
 ## Fake freebuff binary
 The test fixture `tests/fixtures/bin/freebuff` is a simple `sleep` loop. It does
@@ -35,10 +57,74 @@ not write real chat files. Tests create fixture state files manually via
 `make_fake_chat`.
 
 ## Process tracking
-The watcher checks `kill -0 "$LAUNCHER_PID"` to detect when freebuff exits.
-On SIGKILL, the PID disappears immediately so the watcher exits on the next
-poll cycle (~0.7s delay). This is not tested in CI because it requires killing
-processes, which is fragile in test environments.
+The watcher checks `kill -0 "$FREEBUFF_PID"` to detect when freebuff exits. The
+pid is `launch.sh`'s own `$$` at spawn time, which `exec` turns into freebuff's
+pid. The e2e suite starts the watcher against a stand-in process rather than
+killing a real one, because killing real processes is fragile in test
+environments.
+
+## e2e log handling
+Each e2e phase truncates the herdr-stub call log before acting, so an assertion
+can only be satisfied by a report made during that phase. The watcher needs up
+to one poll interval to react, so each phase waits 3s.
+
+## Session pinning
+The watcher pins one chat dir per pane and never re-resolves it, by writer pid.
+`make_fake_chat` therefore takes a writer pid and stamps it into `log.jsonl`,
+exactly as freebuff does, and the herdr stub reports that same pid from
+`pane process-info`. A regression fixture using a different pid models a
+concurrent session precisely.
+
+The e2e suite models a session the way freebuff actually writes: one chat dir
+whose contents change as the turn progresses. It then plants an unrelated
+mid-turn dir written by a different pid, with a strictly newer mtime, and asserts
+the watcher does not follow it.
+
+That regression is not hypothetical. On a live server an idle pane reported
+`idle` for three polls, then flipped to `working` and stayed there for 76
+consecutive polls because an unrelated session in another pane kept its dir
+newer. The old suite would not have caught it: it advanced phases by creating a
+*newer* chat dir each time, which is the exact behaviour the pinning removed.
+
+`stat` resolves whole seconds, so the floor passed from `launch.sh` in
+milliseconds is compared at second resolution. Fixtures that need an ordering
+pin explicit mtimes with `touch -t` rather than relying on creation order.
+
+## Parsing `pane list`
+`herdr pane list` prints the whole panes array on one line. A greedy
+`sed 's/.*"pane_id"..."/\1/p'` therefore yields only the *last* pane id, which
+made the restart sweep attach to one arbitrary pane. `live_pane_ids()` parses it
+with node instead, and `pane_is_live` matches whole lines so `w1:p1` cannot
+match `w1:p11`.
+
+## Restart re-attach scope
+The sweep only touches panes carrying an `owned-<pane_id>` marker. Without that
+check it adopted a freebuff the user had started by hand and began writing herdr
+state into a pane the plugin does not own. The scope test asserts both halves:
+our pane gets a watcher, the unmarked one does not.
+
+The fake freebuff pid in that test must be a process that actually exists. With a
+nonexistent pid the spawned watcher exits immediately and cleans up its own
+pidfile, which reads as "attach failed" rather than "target already gone".
+
+## Signal handling
+Closing a pane makes herdr tear down the pane's whole process group down with
+SIGKILL. No shell trap intercepts that, so the watcher cannot clean up after
+itself in that case — verified live: the watcher exits with no cleanup log line
+and its seq file survives. The release is not needed there, because herdr drops
+the agent along with the pane. `prune_orphan_state()` sweeps the leftovers and
+runs both from the startup hook and at every watcher startup.
+
+`cleanup()` ordering is load-bearing twice: `next_seq` must be read before the
+`rm` of the seq file, because `next_seq` writes it and would otherwise recreate
+the file it just deleted.
+
+## Stub fidelity
+The herdr stub accepts flags real herdr rejects. `herdr pane get` takes no
+`--json` and errors on it, while the stub silently swallowed it, so a test
+passed against a code path that could not work in production. `pane_project_slug`
+now has a test asserting the exact argv reaches the stub, by grepping the stub
+call log for the forbidden flag.
 
 ## `done` test limitation
 When the watcher reports `idle` after a completed turn, herdr should render this

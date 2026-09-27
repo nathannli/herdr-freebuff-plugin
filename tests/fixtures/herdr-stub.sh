@@ -53,6 +53,25 @@ case "$subcmd" in
         fi
         echo "ok report-agent $state seq=$seq"
         ;;
+      release-agent)
+        # validate required args
+        source=""
+        agent=""
+        seq=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --source) source="$2"; shift 2 ;;
+            --agent) agent="$2"; shift 2 ;;
+            --seq) seq="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [ -z "$source" ] || [ -z "$agent" ]; then
+          echo "ERROR: stub missing required --source/--agent" >&2
+          exit 1
+        fi
+        echo "ok release-agent source=$source agent=$agent seq=$seq"
+        ;;
       report-metadata)
         source=""
         agent=""
@@ -69,6 +88,59 @@ case "$subcmd" in
         ;;
       report-agent-session)
         echo "ok report-agent-session"
+        ;;
+      list)
+        # Pane ids come from HERDR_STUB_PANES (space separated) so tests can
+        # model which panes still exist.
+        first=1
+        printf '{"result":{"panes":['
+        for p in ${HERDR_STUB_PANES:-w1:p1}; do
+          [ "$first" -eq 1 ] || printf ','
+          first=0
+          printf '{"pane_id":"%s"}' "$p"
+        done
+        printf '],"type":"pane_list"}}\n'
+        ;;
+      process-info)
+        # Pids come from HERDR_STUB_PANE_PIDS (space separated), or from
+        # HERDR_STUB_PANE_PROCS as "pid:cmdline" pairs separated by "|". The
+        # watcher pins its chat dir by writer pid, so tests must supply the pid
+        # that wrote the fake chat log.
+        printf '{"result":{"process_info":{"foreground_process_group_id":1,"foreground_processes":['
+        first=1
+        if [ -n "${HERDR_STUB_PANE_PROCS:-}" ]; then
+          OLDIFS=$IFS; IFS='|'
+          for entry in $HERDR_STUB_PANE_PROCS; do
+            IFS=$OLDIFS
+            ep=${entry%%:*}
+            ec=${entry#*:}
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"pid":%s,"name":"proc","cmdline":"%s"}' "$ep" "$ec"
+            IFS='|'
+          done
+          IFS=$OLDIFS
+        else
+          for p in ${HERDR_STUB_PANE_PIDS:-}; do
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"pid":%s,"name":"freebuff","cmdline":"/usr/local/bin/freebuff"}' "$p"
+          done
+        fi
+        printf ']}}}\n'
+        ;;
+      get)
+        # `pane get` takes no --json flag; it always prints JSON.
+        pane_id=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --*) shift ;;
+            *) pane_id="$1"; shift ;;
+          esac
+        done
+        cwd="${HERDR_STUB_PANE_CWD:-$PWD}"
+        printf '{"result":{"type":"pane_info","pane":{"pane_id":"%s","cwd":"%s","foreground_cwd":"%s"}}}\n' \
+          "$pane_id" "$cwd" "$cwd"
         ;;
       read)
         # Parse: pane read <pane_id> --source visible --lines N

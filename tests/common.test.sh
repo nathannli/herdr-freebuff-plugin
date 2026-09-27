@@ -1,29 +1,10 @@
 # Tests for scripts/common.sh
 . "$(dirname "$0")/lib.sh"
 
-t_title "common.sh: in_herdr returns true when HERDR_ENV=1"
 . "$(dirname "$0")/../scripts/common.sh"
+
+t_title "common.sh: in_herdr returns true when HERDR_ENV=1"
 t_ok "in_herdr"
-
-t_title "common.sh: ensure_agent_detection copies toml in herdr env"
-FAKEHOME=$(make_fake_home)
-OLD_HOME="$HOME"
-export HOME="$FAKEHOME"
-HERDR_PLUGIN_CONFIG_DIR="$FAKEHOME/.config/herdr/plugins/freebuff-integration"
-export HERDR_PLUGIN_CONFIG_DIR
-mkdir -p "$HERDR_PLUGIN_CONFIG_DIR"
-ensure_agent_detection
-t_file_contains "$HERDR_PLUGIN_CONFIG_DIR/agent-detection/freebuff.toml" "match_cmdline"
-# Cleanup
-rm -rf "$FAKEHOME"
-export HOME="$OLD_HOME"
-unset HERDR_PLUGIN_CONFIG_DIR
-
-t_title "common.sh: ensure_agent_detection is no-op outside herdr"
-unset HERDR_ENV
-result=$(ensure_agent_detection 2>&1)
-t_is "" "$result" "no output when outside herdr"
-export HERDR_ENV=1
 
 t_title "common.sh: in_herdr returns false when HERDR_ENV unset"
 _SAVED="${HERDR_ENV:-}"
@@ -36,3 +17,24 @@ else
 fi
 export HERDR_ENV="$_SAVED"
 unset _SAVED
+
+t_title "common.sh: herdr_cmd honours HERDR_BIN_PATH"
+_SAVED_BIN="${HERDR_BIN_PATH:-}"
+HERDR_BIN_PATH="/custom/herdr"
+. "$(dirname "$0")/../scripts/common.sh"
+t_is "/custom/herdr" "$(herdr_cmd)" "herdr_cmd returns HERDR_BIN_PATH"
+
+t_title "common.sh: herdr_cmd falls back to herdr on PATH"
+unset HERDR_BIN_PATH
+. "$(dirname "$0")/../scripts/common.sh"
+t_is "herdr" "$(herdr_cmd)" "herdr_cmd falls back to bare herdr"
+HERDR_BIN_PATH="$_SAVED_BIN"
+unset _SAVED_BIN
+
+t_title "common.sh: can_report requires env, pane id and socket"
+_SAVED_SOCK="${HERDR_SOCKET_PATH:-}"
+unset HERDR_SOCKET_PATH
+t_ok "! can_report"    # no socket: herdr cannot receive reports
+export HERDR_SOCKET_PATH="$_SAVED_SOCK"
+t_ok "can_report"      # run.sh exports HERDR_ENV=1 and HERDR_PANE_ID
+unset _SAVED_SOCK
