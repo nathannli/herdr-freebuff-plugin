@@ -15,6 +15,7 @@ Makes [Freebuff](https://freebuff.com) a first-class agent inside [Herdr](https:
   - AI processing heartbeat (`working` from `• Thinking` / `Thinking...` / `Working...`)
   - Esc abort (`idle` from the `[response interrupted]` marker)
 - **Authority release** — the watcher calls `pane release-agent` when freebuff exits, so a pane can never be left showing a stale `working` or `blocked` dot.
+- **Adopts manual panes** — a freebuff you started by hand is detected and watched too, so every pane reports state, not just the ones the plugin opened.
 - **Launch panes** — new task, or resume the last session.
 - **Notifications** — a `notify` action sends a herdr toast.
 
@@ -63,10 +64,15 @@ Or bind a key:
 ```toml
 [[keys.command]]
 key = "prefix+f"
-type = "plugin_pane"
-command = "freebuff.integration.task"
+type = "shell"
+command = "herdr plugin pane open --plugin freebuff.integration --entrypoint task"
 description = "Freebuff: new task"
 ```
+
+There is no `plugin_pane` key type in herdr 0.9.1 — `server reload-config`
+rejects it with `unknown variant 'plugin_pane', expected one of shell, pane,
+popup, plugin_action`. A `shell` command that calls `herdr plugin pane open`
+does the same thing.
 
 Send a notification:
 
@@ -74,11 +80,13 @@ Send a notification:
 herdr plugin action invoke freebuff.integration.notify "Build done" "api workspace"
 ```
 
-Typeing `freebuff` directly in a terminal does **not** report lifecycle state.
-State reporting only happens for panes this plugin opened, which is where
-`HERDR_ENV`, `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` exist. A freebuff you start
-yourself shows `agent_status: unknown` in herdr — verified on a live server, not
-theoretical.
+A freebuff you start by hand is **adopted**: the plugin finds it, watches it, and
+the pane reports `idle` / `working` / `blocked` like any other. See
+[Adopting manual panes](#adopting-manual-panes) for how detection is kept strict
+and how to turn it off.
+
+Before adoption existed such a pane showed `agent_status: unknown` forever, which
+was verified on a live server rather than assumed.
 
 ### Notifications (blocked → toast + sound)
 
@@ -166,10 +174,73 @@ with no readable pid is a writer mid-update and is left alone.
 
 A watcher dies with the pane's process tree, so a server restart used to leave
 surviving freebuff panes reporting nothing — and herdr forgets the display name
-too. The plugin now records an `owned-<pane_id>` marker when it launches a
-session, and a startup hook re-attaches watchers to those panes after restore.
+too. The plugin records an `owned-<pane_id>` marker when it launches a session
+and an `adopted-<pane_id>` marker when it claims a pane you started yourself, and
+a startup hook re-attaches watchers to every marked pane after restore.
 
-Panes you started freebuff in yourself are never adopted, even across a restart.
+Re-attachment covers adopted panes too, and that is load-bearing rather than
+tidy. A SIGKILLed watcher never runs the cleanup that calls `release-agent`, so
+herdr holds that pane's last reported state indefinitely. If re-attachment only
+knew about `owned-` panes, an adopted pane would be skipped by it (no `owned-`
+marker) *and* by the adoption sweep (already adopted), and its dot would be stuck
+forever. This was observed live before the fix: panes showing `agent: freebuff`
+with no watcher process anywhere.
+
+### Adopting manual panes
+
+A freebuff started outside the plugin has no `owned-` marker, so nothing would
+ever watch it. `scripts/adopt-watches.sh` claims those panes, and a small polling
+daemon runs the claim continuously.
+
+**Detection is strict.** A pane is adopted only when `pane process-info` shows a
+process whose command line resolves to a real freebuff binary:
+`~/.config/manicode/freebuff`, `$FREEBUFF_BIN_PATH`, `<node-prefix>/bin/freebuff`
+under fnm / nvm / asdf / mise, or `freebuff` resolved on `PATH`. Matching the
+substring `freebuff` would adopt `vim freebuff-notes.md` or
+`grep -r freebuff` and paint a state dot onto an unrelated session. The plugin's
+own scripts are explicitly excluded.
+
+**Adoption happens once; attachment is separate.** The claim is recorded in
+`adopted-<pane_id>` before the watcher is spawned, and keeping that watcher alive
+is `attach-watches.sh`'s job. Adoption is the one-way decision to write herdr
+state into a pane you own, so it is never made twice or undone silently.
+
+**Pinning is pid-only for adopted panes.** An adopted pane has no launch floor,
+so there is no mtime to prove a chat dir belongs to it, and "newest dir" cannot
+identify a resumed session. Such a pane waits for a writer-pid match and reports
+`idle` until one appears, which self-heals the moment freebuff writes its first
+log line.
+
+#### Turning adoption off
+
+There is no `herdr plugin state-dir` subcommand; the state dir is the `state/`
+sibling of the config dir `herdr plugin config-dir` prints, and each watcher logs
+its own resolved path at startup.
+
+```bash
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/freebuff.integration"
+
+# Stop claiming new panes. Watchers already running keep running: killing one
+# without releasing its herdr authority would leave a stale dot behind.
+touch "$STATE_DIR/no-adopt"
+
+# Opt a single pane out, by pane id. This does detach it: re-attachment skips
+# the pane, so a watcher killed later is not replaced.
+touch "$STATE_DIR/no-adopt-w1:p1"
+```
+
+`FREEBUFF_NO_ADOPT=1` in the environment has the same effect as the `no-adopt`
+file, and `FREEBUFF_SWEEP_INTERVAL` (default `20`) sets the sweep period.
+
+#### Why a daemon
+
+The startup hook runs once per server. A freebuff you start ten minutes later
+would never be claimed, and herdr 0.9.1 offers no way to hook pane creation: no
+cron, no scheduler, no `events.subscribe`. So `scripts/sweep-daemon.sh` polls,
+running prune → attach → adopt every 20s. Exactly one daemon runs: it claims
+`sweep-daemon.pid` with an exclusive create, and a claim held by a live process
+makes every other starter back off. A dead holder's claim is reclaimed, so a
+daemon killed with its server comes back on the next startup hook.
 
 ### State detection matrix
 
@@ -217,11 +288,16 @@ state transitions and lifecycle calls to:
 `state/` directory, and the watcher logs its own resolved path at startup.
 
 Logs older than a day are pruned, along with per-pane state files belonging to
-panes herdr no longer lists. The sweep runs from the plugin's startup hook and
-again whenever a new watcher starts, so stale files never accumulate. It has to
-be external: closing a pane makes herdr SIGKILL the pane's whole process group,
-which no shell trap can intercept, so a watcher cannot clean up after itself in
-that case.
+panes herdr no longer lists. The sweep runs from the plugin's startup hook, from
+every pass of the sweep daemon, and again whenever a new watcher starts, so stale
+files never accumulate. It has to be external: closing a pane makes herdr SIGKILL
+the pane's whole process group, which no shell trap can intercept, so a watcher
+cannot clean up after itself in that case.
+
+The sweep daemon logs its lifecycle to `<state dir>/sweep-daemon.log`, and only
+when `FREEBUFF_DEBUG` is set. `FREEBUFF_NO_DAEMON=1` suppresses it; the test
+runner sets that, because a long-lived daemon inheriting the suite's environment
+would prune against a stale view of the world.
 
 ### When the watcher loses herdr
 
@@ -256,8 +332,10 @@ against a dead server would never attempt a report, and so would never notice.
 | `scripts/watcher-lib.sh` | Shared classify/detect helpers (file-based + screen) |
 | `scripts/common.sh` | `herdr_cmd`, `in_herdr`, `can_report`, `prune_orphan_state`, plugin root/state defaults |
 | `scripts/notify.sh` | Sends a herdr notification |
-| `scripts/prune-state.sh` | Startup hook; calls `prune_orphan_state` |
-| `tests/` | Test suite: 7 suites, 79 cases |
+| `scripts/prune-state.sh` | Startup hook; attach + adopt, then starts the sweep daemon |
+| `scripts/adopt-watches.sh` | Claims panes running a freebuff the user started by hand |
+| `scripts/sweep-daemon.sh` | Polls prune → attach → adopt so later panes are claimed too |
+| `tests/` | Test suite: 9 suites |
 
 ## Notes
 

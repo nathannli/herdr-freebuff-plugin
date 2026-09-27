@@ -5,8 +5,8 @@
 # Requires common.sh (for herdr_cmd) to be sourced first.
 #
 # Provides: classify, classify_signals, chat_dir_still_ours, detect_screen_state,
-#           find_newest_chat, pane_project_slug, pane_pids, pin_own_chat_dir,
-#           should_report_state
+#           find_newest_chat, freebuff_paths, pane_freebuff_pid, pane_project_slug,
+#           pane_pids, pin_own_chat_dir, should_report_state
 
 # How many consecutive `idle` observations are required before dropping out of a
 # non-idle state. A single failed pane read, or one transient screen frame, can
@@ -199,27 +199,79 @@ pane_pids() {
   ' 2>/dev/null
 }
 
+# Absolute paths that identify a real freebuff process.
+#
+# Matching on a substring of "freebuff" would adopt any pane running
+# `vim freebuff-notes.md` or `grep freebuff`. Two real shapes exist, both
+# observed live via `pane process-info`:
+#   node /Users/…/fnm/node-versions/v24.21.0/installation/bin/freebuff
+#   /Users/nathan/.config/manicode/freebuff
+# The first is the parent whose pid stamps the chat logs, so it is the one the
+# watcher must follow.
+#
+# The fnm path is matched by shape rather than by an exact path, because the
+# node version and fnm layout differ per machine. Everything else is an exact
+# path. FREEBUFF_BIN_PATH overrides the PATH-resolved binary for a custom
+# install.
+freebuff_paths() {
+  printf '%s\n' \
+    "${HOME}/.config/manicode/freebuff" \
+    "${FREEBUFF_BIN_PATH:-/nonexistent/freebuff}"
+
+  # fnm / nvm / asdf / mise node installs: <prefix>/bin/freebuff
+  for _root in \
+    "${HOME}/.local/share/fnm/node-versions"/*/installation/bin \
+    "${HOME}/.nvm/versions/node"/*/bin \
+    "${HOME}/.asdf/installs/nodejs"/*/bin \
+    "${HOME}/.local/share/mise/installs/node"/*/bin; do
+    [ -x "$_root/freebuff" ] && printf '%s\n' "$_root/freebuff"
+  done
+
+  # The plain `freebuff` on PATH, resolved.
+  _onpath=$(command -v freebuff 2>/dev/null)
+  if [ -n "$_onpath" ]; then
+    case "$_onpath" in
+      /*) printf '%s\n' "$_onpath" ;;
+      *) printf '%s\n' "$(cd "$(dirname "$_onpath")" 2>/dev/null && pwd)/$(basename "$_onpath")" ;;
+    esac
+  fi
+}
+
 # Echo the pid of the freebuff process running in a pane, or nothing.
 #
-# The plugin's own processes are excluded: this is what tells an adoption sweep
-# that a pane runs freebuff rather than one of the plugin's own scripts.
+# Strict on purpose: this decides whether the plugin takes ownership of a pane
+# the user started by hand, so a false positive writes herdr state into
+# somebody's unrelated session. A false negative just means that pane keeps
+# showing `unknown`, which is the status quo.
 pane_freebuff_pid() {
   _pane_id="$1"
   [ -z "$_pane_id" ] && return 0
-  "$(herdr_cmd)" pane process-info --pane "$_pane_id" 2>/dev/null | node -e '
-    let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-      try{
-        const pi=JSON.parse(d).result.process_info;
-        for(const p of (pi.foreground_processes||[])){
-          const cmd=p.cmdline||"";
-          if(!p.pid) continue;
-          if(cmd.indexOf("status-watcher.sh")>=0) continue;
-          if(cmd.indexOf("attach-watches.sh")>=0) continue;
-          if(cmd.indexOf("freebuff")>=0){ process.stdout.write(p.pid+"\n"); return; }
-        }
-      }catch{}
-    })
-  ' 2>/dev/null | head -1
+
+  _paths=$(freebuff_paths)
+  [ -n "$_paths" ] || return 0
+
+  "$(herdr_cmd)" pane process-info --pane "$_pane_id" 2>/dev/null |
+    FREEBUFF_PATHS="$_paths" node -e '
+      const paths = (process.env.FREEBUFF_PATHS || "").split("\n").filter(Boolean);
+      const isFreebuff = (cmd) => {
+        if (!cmd) return false;
+        // The plugin never adopts its own processes.
+        if (cmd.indexOf("status-watcher.sh") >= 0) return false;
+        if (cmd.indexOf("attach-watches.sh") >= 0) return false;
+        if (cmd.indexOf("adopt-watches.sh") >= 0) return false;
+        if (cmd.indexOf("sweep-daemon.sh") >= 0) return false;
+        return paths.some((p) => cmd === p || cmd.indexOf(p) >= 0);
+      };
+      let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+        try{
+          const pi=JSON.parse(d).result.process_info;
+          for(const p of (pi.foreground_processes||[])){
+            if(!p.pid) continue;
+            if(isFreebuff(p.cmdline)){ process.stdout.write(p.pid+"\n"); return; }
+          }
+        }catch{}
+      })
+    ' 2>/dev/null | head -1
 }
 
 # List the distinct pids that have written a chat dir's log.jsonl. freebuff

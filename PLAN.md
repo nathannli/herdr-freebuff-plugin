@@ -93,16 +93,67 @@ watcher while the panes and their freebuff processes survive. Those panes then
 reported nothing until the user relaunched freebuff by hand, and herdr had also
 forgotten the display name.
 
-`launch.sh` writes an `owned-<pane_id>` marker when it launches a session.
-`scripts/attach-watches.sh`, run from the `[[startup]]` hook after restore, walks
-the live panes, skips any that already have a live watcher, and re-attaches the
-rest using the freebuff pid from `pane process-info`.
+`launch.sh` writes an `owned-<pane_id>` marker when it launches a session, and
+`scripts/adopt-watches.sh` writes `adopted-<pane_id>` when it claims a pane the
+user started by hand. `scripts/attach-watches.sh`, run from the `[[startup]]` hook
+after restore and from every sweep-daemon pass, walks the live panes, skips any
+that already have a live watcher, and re-attaches the rest using the freebuff pid
+from `pane process-info`.
 
 Scope is the point: only panes carrying a marker are re-attached. Without that
 check the sweep also adopts freebuff sessions the user started by hand and starts
 writing herdr state into panes the plugin does not own. Verified live — the
 sweep restored `agent=freebuff display=freebuff status=idle` on a killed-watcher
 pane and left a manually started pane unregistered.
+
+Both markers are in scope, and that is load-bearing rather than tidiness. A
+SIGKILLed watcher never runs the cleanup that calls `release-agent`, so herdr holds
+the last reported state forever. With `owned-` alone, an adopted pane was skipped
+by the attach sweep (no `owned-` marker) and by the adoption sweep (already
+adopted), so nothing replaced its watcher and its dot was stuck permanently. Seen
+live before the fix: panes reporting `agent: freebuff` with no watcher process
+anywhere. `tests/adopt.test.sh` now pins this with a SIGKILL-then-re-attach case
+that fails against the `owned-`-only version.
+
+### Adopting panes the user started
+
+`scripts/adopt-watches.sh` claims panes the plugin did not launch. It is the only
+place the plugin writes herdr state into a pane it does not own, so the gating is
+the design:
+
+1. **Detection is strict.** `pane_freebuff_pid` matches resolved freebuff binary
+   paths — `~/.config/manicode/freebuff`, `$FREEBUFF_BIN_PATH`, `<prefix>/bin/
+   freebuff` under fnm/nvm/asdf/mise, and `freebuff` resolved on `PATH` — not the
+   substring `freebuff`. A substring match adopts `vim freebuff-notes.md` and
+   `grep -r freebuff`; anti-vacuity was checked by reverting to it and watching
+   three lookalikes get adopted. The plugin's own scripts are excluded too. A false
+   negative just leaves `unknown`, which is the status quo.
+2. **Pinning is pid-only.** An adopted pane has no launch floor, so there is no
+   mtime that proves a chat dir is its own, and newest-by-mtime cannot identify a
+   resumed session. It waits for a writer-pid match and reports `idle` until one
+   appears.
+3. **Adoption is once, visible, and reversible.** The `adopted-` marker is written
+   *before* the watcher is spawned, so a sweep that dies between the two does not
+   cause a second adoption. `no-adopt` stops new claims, `no-adopt-<pane_id>`
+   detaches one pane, `FREEBUFF_NO_ADOPT=1` does the first from the environment.
+   Turning adoption off does not kill existing watchers: a watcher stopped without
+   releasing its herdr authority leaves a stale dot, which is worse than a live
+   watcher on an unwanted pane.
+
+Adoption and attachment are separate steps on purpose. Adoption is a one-way
+decision to write state into a pane the user owns; attachment is idempotent
+bookkeeping over claims that already exist.
+
+### Why a polling daemon
+
+The startup hook runs once per server, so a freebuff started later would never be
+adopted. herdr 0.9.1 exposes no cron, no scheduler, and no `events.subscribe`, so
+pane creation cannot be hooked at all — polling is the only option.
+`scripts/sweep-daemon.sh` runs prune → attach → adopt every
+`FREEBUFF_SWEEP_INTERVAL` seconds (default 20). One daemon runs: it claims
+`sweep-daemon.pid` with `set -C`, and a claim held by a live process makes every
+other starter exit. A dead holder's claim is reclaimed, so a daemon killed with
+its server returns on the next startup hook.
 
 ### Reporting contract
 - Source id `custom:freebuff`, agent label `freebuff`. Stable and unique per
@@ -140,13 +191,15 @@ file-based state is stale during exactly the windows that matter.
 | `scripts/common.sh` | `herdr_cmd`, `in_herdr`, `can_report`, plugin root/state defaults |
 | `scripts/launch.sh` | Pane entrypoint; spawns watcher, execs `freebuff` |
 | `scripts/status-watcher.sh` | Per-pane poller; reports and releases state |
-| `scripts/watcher-lib.sh` | `classify`, `detect_blocked`, `last_matching_ts`, `find_newest_chat`, `detect_screen_state` |
+| `scripts/watcher-lib.sh` | `classify`, `detect_blocked`, `last_matching_ts`, `find_newest_chat`, `detect_screen_state`, `freebuff_paths`, `pane_freebuff_pid` |
 | `scripts/notify.sh` | Sends a herdr notification |
-| `scripts/prune-state.sh` | Startup hook; runs the re-attach sweep |
-| `scripts/attach-watches.sh` | Startup hook; re-attaches watchers to surviving plugin-launched panes |
+| `scripts/prune-state.sh` | Startup hook; attach + adopt, then starts the sweep daemon |
+| `scripts/attach-watches.sh` | Re-attaches watchers to every claimed (`owned-`/`adopted-`) pane |
+| `scripts/adopt-watches.sh` | Claims panes running a freebuff the user started by hand |
+| `scripts/sweep-daemon.sh` | Polls prune → attach → adopt so later panes are claimed too |
 | `scripts/common.sh` also owns `prune_orphan_state`, `live_pane_ids` | Sweeps state for dead panes and logs older than a day |
 
-### Tests (79 cases, 7 suites, all passing)
+### Tests (9 suites, all passing)
 | File | Tests |
 |---|---|
 | `tests/common.test.sh` | 5 (`in_herdr`, `herdr_cmd`, `can_report`) |
@@ -154,12 +207,15 @@ file-based state is stale during exactly the windows that matter.
 | `tests/launch.test.sh` | 8 (modes, watcher spawn guards, error cases) |
 | `tests/notify.test.sh` | 2 (sends notification, fails outside herdr) |
 | `tests/prune.test.sh` | 6 (orphan sweep, pane-id prefix safety, log pruning) |
-| `tests/attach.test.sh` | 20 (debounce gate, pid pinning, floor-gated fallback, pin re-validation, `pane_freebuff_pid`, sweep scope, concurrent-sweep race, claim primitive) |
+| `tests/attach.test.sh` | 21 (debounce gate, pid pinning, floor-gated fallback, pin re-validation, `pane_freebuff_pid` lookalikes, sweep scope, concurrent-sweep race, claim primitive) |
+| `tests/adopt.test.sh` | 15 (path resolution, lookalike and own-script rejection, adoption + marker, no re-adoption, `owned-` panes untouched, `no-adopt` / `FREEBUFF_NO_ADOPT` / per-pane opt-out, adopted-marker sweep, re-attach after SIGKILL, opt-out detach) |
 | `tests/watcher.test.sh` | 43 (classify matrix, `detect_screen_state`, `classify_signals`, `find_newest_chat`, `pane_project_slug`) |
 
 Each e2e phase resets the herdr-stub call log before asserting, so a state
 reported in an earlier phase can never satisfy a later assertion. The runner
-accumulates per-suite failures instead of aborting on the first broken file.
+accumulates per-suite failures instead of aborting on the first broken file, and
+exports `FREEBUFF_NO_DAEMON=1`: a long-lived daemon would inherit the suite's
+environment and prune against a stale view of the world.
 
 ## Key commands
 - **Link**: `herdr plugin link /path/to/herdr-freebuff-plugin`
@@ -205,10 +261,12 @@ candidates is deliberately larger than the number of panes attached.
 
 All were confirmed against a live herdr 0.9.1 server, not inferred.
 
-- **Only plugin-launched panes report state.** A freebuff started any other way
-  shows `agent_status: unknown` in herdr. There is no watcher for it. Verified:
-  a manually started freebuff pane reports `agent: None`, `status: unknown`,
-  while a plugin-opened pane reports `agent: freebuff`, `status: idle`.
+- **Manual panes are adopted, but conservatively.** A freebuff started by hand is
+  watched like any other. Before adoption it reported `agent: None`,
+  `status: unknown`; verified live. Adoption needs strict binary-path detection,
+  so an unusual freebuff install that resolves to none of the known prefixes
+  stays `unknown` rather than being adopted on a guess. `FREEBUFF_BIN_PATH`
+  overrides the resolved set.
 - **A resumed pane can sit at `idle` before it pins.** `resume-last` and
   `resume-named` pass a floor of `0`, which disables the newest-by-mtime
   fallback, because "newest" cannot identify a resumed session and a wrong pin

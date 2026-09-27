@@ -149,14 +149,68 @@ with node instead, and `pane_is_live` matches whole lines so `w1:p1` cannot
 match `w1:p11`.
 
 ## Restart re-attach scope
-The sweep only touches panes carrying an `owned-<pane_id>` marker. Without that
-check it adopted a freebuff the user had started by hand and began writing herdr
-state into a pane the plugin does not own. The scope test asserts both halves:
-our pane gets a watcher, the unmarked one does not.
+The sweep only touches panes the plugin has already claimed: an `owned-<pane_id>`
+marker (launched by `launch.sh`) or an `adopted-<pane_id>` marker (claimed by
+`adopt-watches.sh`). Without that check it adopted a freebuff the user had
+started by hand and began writing herdr state into a pane the plugin does not
+own. The scope test asserts both halves: our pane gets a watcher, the unmarked
+one does not.
 
-The fake freebuff pid in that test must be a process that actually exists. With a
-nonexistent pid the spawned watcher exits immediately and cleans up its own
+Both markers are in scope because of a bug this suite now pins. A SIGKILLed
+watcher never runs the cleanup that calls `release-agent`, so herdr holds the
+pane's last reported state indefinitely. With `owned-` alone, an adopted pane was
+skipped by the attach sweep *and* by the adoption sweep, so nothing replaced its
+watcher and its dot was stuck permanently — observed live as panes reporting
+`agent: freebuff` with no watcher process anywhere. The regression test adopts a
+pane, `kill -9`s its watcher, re-runs the attach sweep, and asserts a live
+watcher exists afterwards. Reverting the scope to `owned-`-only makes exactly
+that test fail.
+
+The fake freebuff pid in these tests must be a process that actually exists. With
+a nonexistent pid the spawned watcher exits immediately and cleans up its own
 pidfile, which reads as "attach failed" rather than "target already gone".
+
+## Adoption
+`tests/adopt.test.sh` is mostly about what must *not* be adopted, because
+adoption is the one place the plugin writes herdr state into a pane it does not
+own.
+
+Detection matches resolved freebuff binary paths, so the suite asserts rejection
+of `vim freebuff-notes.md`, `grep -r freebuff`, and
+`sh …/freebuff-backup.sh`, plus the plugin's own four scripts. Anti-vacuity was
+checked by reverting `pane_freebuff_pid` to a substring match: all three
+lookalikes were then wrongly adopted. That is the only assertion in the suite
+that would have passed against the old loose matcher.
+
+The fixtures moved from `/Users/x/…` and `/usr/local/bin/freebuff` to
+`${HOME}/.config/manicode/freebuff` when the matcher went strict. A hardcoded
+foreign path passes only under a substring match, so the old fixture was
+asserting the bug.
+
+An adopted pane has no launch floor, so it is spawned with floor `0` and waits
+for a writer-pid match before pinning. It reports `idle` until then, which
+self-heals the moment freebuff writes its first log line.
+
+## The sweep daemon
+`tests/run.sh` exports `FREEBUFF_NO_DAEMON=1`. A daemon started by a suite would
+outlive the run, inherit the stub environment, and keep sweeping a stale pane
+list — deleting state files other suites are still asserting on. `prune-state.sh`
+honours the variable and skips starting it.
+
+Note that the daemon is not covered by an automated test of its own: it is
+long-lived by design, and a test that starts one has to tear it down by pid,
+which is the same fragile pattern the suite avoids elsewhere. Its single-instance
+claim and kill switch were verified by hand against a live server.
+
+## Detaching background processes from a tool call
+Not a property of the plugin, but it cost real time to learn and will cost it
+again. A long-lived process started from a tool call is reaped when that call's
+process group is torn down, and `nohup setsid … &` does not reliably prevent it:
+a control `nohup sh -c 'sleep 300'` survived while the daemon wrote no pidfile
+at all. A detached wrapper script worked. The same reap kills foreground test
+runs of ~200s, so the suite is run in per-suite batches instead. Live watchers
+and the daemon started this way die between calls; herdr's own startup hook
+reparents them properly, which is the environment that actually matters.
 
 ## Losing herdr
 Every herdr call in the watcher ends in `>/dev/null 2>&1`, which is what let a
@@ -197,6 +251,10 @@ runs both from the startup hook and at every watcher startup.
 `cleanup()` ordering is load-bearing twice: `next_seq` must be read before the
 `rm` of the seq file, because `next_seq` writes it and would otherwise recreate
 the file it just deleted.
+
+The same SIGKILL is what makes re-attachment cover adopted panes: herdr holds the
+last reported state when no live authority holder ever releases it, so a pane
+whose watcher was killed needs a replacement watcher, not a release.
 
 ## Stub fidelity
 The herdr stub accepts flags real herdr rejects. `herdr pane get` takes no

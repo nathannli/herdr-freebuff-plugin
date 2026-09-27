@@ -128,9 +128,18 @@ t_is "" "$result" "empty process-info means no pin yet"
 # --- pane_freebuff_pid ---
 
 t_title "pane_freebuff_pid: finds freebuff and ignores the plugin's own scripts"
-export HERDR_STUB_PANE_PROCS="74167:sh /x/scripts/status-watcher.sh 1 w1:p1|72243:/Users/x/.config/manicode/freebuff|72232:node /x/bin/freebuff"
+# Paths are resolved against the suite's fake HOME, because freebuff_paths
+# derives the manicode path from $HOME. Using a hardcoded /Users/x path here
+# would pass only under the old loose substring match, which is exactly what
+# this test must not depend on.
+export HERDR_STUB_PANE_PROCS="74167:sh /x/scripts/status-watcher.sh 1 w1:p1|72243:${HOME}/.config/manicode/freebuff|72232:node /x/bin/freebuff"
 result=$(pane_freebuff_pid "w1:p1")
 t_is "72243" "$result" "picks the freebuff process, not the watcher shell"
+
+t_title "pane_freebuff_pid: rejects a lookalike that only mentions freebuff"
+export HERDR_STUB_PANE_PROCS="74167:vim /Users/nathan/notes/freebuff-notes.md|72243:${HOME}/.config/manicode/freebuff"
+result=$(pane_freebuff_pid "w1:p1")
+t_is "72243" "$result" "skips the lookalike and still finds the real binary"
 
 t_title "pane_freebuff_pid: empty when only plugin scripts are present"
 export HERDR_STUB_PANE_PROCS="74167:sh /x/scripts/status-watcher.sh 1 w1:p1"
@@ -159,7 +168,10 @@ export HERDR_STUB_PANES="w1:p1 w1:p2"
 # The fake freebuff pid must be a process that actually exists, otherwise the
 # spawned watcher exits immediately and cleans up its own pidfile.
 FAKE_FB=$$
-export HERDR_STUB_PANE_PROCS="${FAKE_FB}:/usr/local/bin/freebuff"
+# A real freebuff path for the strict matcher. The plugin pane is owned, so
+# adoption must not touch it regardless; this only proves the sweep still finds
+# its freebuff pid.
+export HERDR_STUB_PANE_PROCS="${FAKE_FB}:${HOME}/.config/manicode/freebuff"
 export HERDR_STUB_PANE_CWD="/Users/someone/dev/attachproj"
 
 before_ours=$(ls "$SWEEP_STATE" | grep -c 'watch-w1:p1.pid' || true)
@@ -199,7 +211,7 @@ export HERDR_PLUGIN_ROOT="$PROJECT_ROOT"
 export HERDR_STUB_PANES="w1:p1"
 : > "$RACE_STATE/owned-w1:p1"
 RACE_FB=$$
-export HERDR_STUB_PANE_PROCS="${RACE_FB}:/usr/local/bin/freebuff"
+export HERDR_STUB_PANE_PROCS="${RACE_FB}:${HOME}/.config/manicode/freebuff"
 export HERDR_STUB_PANE_CWD="/Users/someone/dev/attachproj"
 export HERDR_BIN_PATH="$PROJECT_ROOT/tests/fixtures/herdr-stub.sh"
 export HERDR_CALL_LOG="$RACE_HOME/calls.log"
