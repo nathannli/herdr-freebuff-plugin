@@ -13,13 +13,75 @@
 # True when running inside a managed herdr pane.
 in_herdr() { [ "${HERDR_ENV:-}" = "1" ]; }
 
+# Add the well-known install prefixes to PATH if they are missing from it.
+#
+# Herdr panes do not get a login shell's PATH. Panes are spawned by the herdr
+# *server*, and that server is normally started by launchd from herdr-gui's
+# LaunchAgent, which inherits launchd's default PATH:
+#
+#   /usr/bin:/bin:/usr/sbin:/sbin
+#
+# On a version-managed node install that contains none of `freebuff`, `node`, or
+# `herdr`, so every one of them fails: launch.sh aborts with "freebuff binary not
+# found on PATH", and even if it did not, the watcher's `next_seq` and the
+# classifier's node parse would both fail, taking state reporting down with it.
+# Verified on this machine: under that exact PATH, `command -v` finds none of the
+# three.
+#
+# It is an *appended* fallback, not a replacement, and that ordering is the whole
+# design. Anything already on PATH keeps winning, so a pane launched from a real
+# shell is completely unaffected and an interactive login shell's own version
+# selection still takes precedence. Prepending would be wrong: it would let a
+# fallback directory shadow a binary the user had already resolved, silently
+# running a different version than the one their shell would have.
+#
+# Only directories that actually exist are added, and a missing one costs
+# nothing. This runs once per script; it is a handful of `[ -d ]` tests, not a
+# scan.
+augment_path() {
+  for _dir in \
+    "${HOME}/.local/bin" \
+    "${HOME}/.local/share/fnm/node-versions"/*/installation/bin \
+    "${HOME}/.nvm/versions/node"/*/bin \
+    "${HOME}/.asdf/installs/nodejs"/*/bin \
+    "${HOME}/.local/share/mise/installs/node"/*/bin \
+    /opt/homebrew/bin \
+    /usr/local/bin; do
+    [ -d "$_dir" ] || continue
+    # Skip a directory already on PATH, so the common case leaves PATH alone.
+    case ":${PATH}:" in
+      *":${_dir}:"*) continue ;;
+    esac
+    PATH="${PATH}:${_dir}"
+  done
+  export PATH
+  return 0
+}
+
+# Called after the definition, and before any caller can resolve a binary. Every
+# script that runs `herdr`, `node`, or `freebuff` sources this file first, so one
+# call here covers the launcher, the watcher, and the sweeps together.
+augment_path
+
 # Resolve the herdr binary. Single source of truth for every herdr call.
+#
+# HERDR_BIN_PATH wins, so the test suite can point at a stub. Otherwise fall back
+# to a PATH lookup, but verify it resolves: a bare `herdr` that is not on PATH
+# fails at exec time with "not found" and every call site discards stderr, which
+# is indistinguishable from a dead server. That ambiguity is why the watcher's
+# failure counter exists, but a pane that can never report is better caught here.
 herdr_cmd() {
   if [ -n "${HERDR_BIN_PATH:-}" ]; then
     printf '%s' "$HERDR_BIN_PATH"
+    return 0
+  fi
+  _resolved=$(command -v herdr 2>/dev/null)
+  if [ -n "$_resolved" ]; then
+    printf '%s' "$_resolved"
   else
     printf 'herdr'
   fi
+  return 0
 }
 
 # True when this pane can actually report to a running herdr server.

@@ -22,8 +22,10 @@ Makes [Freebuff](https://freebuff.com) a first-class agent inside [Herdr](https:
 ## Requirements
 
 - Herdr >= 0.9.1
-- `freebuff` on your `PATH` (`npm i -g freebuff`)
-- `node` on your `PATH` (the classifier parses freebuff's JSON in node)
+- `freebuff` reachable on `PATH`, or in one of the prefixes the plugin appends
+  (see [PATH in a herdr pane](#path-in-a-herdr-pane))
+- `node` reachable the same way (the classifier parses freebuff's JSON in node,
+  and the watcher builds its seq counter in node)
 - Linux or macOS. The scripts are POSIX `sh`; Windows is not supported.
 
 ## Install
@@ -119,6 +121,31 @@ There is deliberately **no PATH wrapper**. An earlier version installed a shim a
 Any plugin reinstall or hash change left that shim pointing at a deleted
 directory, which silently killed all state reporting while still shadowing the
 real `freebuff` binary.
+
+### PATH in a herdr pane
+
+A pane does not get your login shell's `PATH`. Panes are spawned by the herdr
+*server*, and that server is usually started by launchd from herdr-gui's
+LaunchAgent, which inherits launchd's default:
+
+```
+/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+On a version-managed node install that contains none of `freebuff`, `node`, or
+`herdr`. So `scripts/common.sh` appends the well-known install prefixes —
+`~/.local/bin`, the fnm / nvm / asdf / mise node `bin` dirs, `/opt/homebrew/bin`,
+`/usr/local/bin` — to any that are missing.
+
+It **appends** rather than prepends, and that ordering is the point: anything
+already on `PATH` keeps winning, so a pane opened from a real shell is entirely
+unaffected and your shell's own version selection still applies. A pane can never
+be pushed onto a different `node` than the one you would have got yourself.
+
+This runs before anything resolves a binary, so it covers the launcher's
+`freebuff`, the watcher's `herdr` calls, and the classifier's `node` parse
+together. Set `FREEBUFF_BIN_PATH` if freebuff lives somewhere none of those
+prefixes cover.
 
 ### Session pinning
 

@@ -32,17 +32,37 @@ spawn_watcher() {
 
 # A brand-new session creates its chat dir after launch. Pin the watcher to
 # dirs created at or after now so it cannot latch onto another live session.
+#
+# Falling back to 0 is not a safe degradation: a zero floor disables the
+# newest-by-mtime fallback in the watcher, so a brand-new session would pin by
+# writer pid only and report idle until freebuff writes its first log line. Warn
+# rather than fail, because a session without a floor still works, just less
+# precisely.
 now_ms() {
-  node -e 'process.stdout.write(String(Date.now()))' 2>/dev/null || printf '0'
+  _ms=$(node -e 'process.stdout.write(String(Date.now()))' 2>/dev/null) || _ms=""
+  if [ -z "$_ms" ]; then
+    echo "warning: node not on PATH; starting without a launch-time pin floor" >&2
+    printf '0'
+    return 0
+  fi
+  printf '%s' "$_ms"
 }
 
-# Resolve freebuff binary.
+# Resolve freebuff binary. common.sh has already prepended the well-known
+# install prefixes, so a pane spawned by a launchd-started herdr server still
+# finds a version-managed freebuff.
 FREEBUFF_BIN="${FREEBUFF_BIN_PATH:-}"
 if [ -z "$FREEBUFF_BIN" ]; then
   FREEBUFF_BIN=$(command -v freebuff 2>/dev/null)
 fi
 if [ -z "$FREEBUFF_BIN" ] || [ ! -x "$FREEBUFF_BIN" ]; then
-  echo "freebuff binary not found on PATH" >&2
+  # Name node too: without it the watcher's seq counter and the classifier both
+  # fail, so a pane that opened without state reporting would look like a
+  # different bug entirely.
+  echo "freebuff binary not found on PATH (looked on PATH and in ~/.local/bin," >&2
+  echo "fnm/nvm/asdf/mise node bins, /opt/homebrew/bin, /usr/local/bin)." >&2
+  [ -n "${FREEBUFF_BIN_PATH:-}" ] && echo "FREEBUFF_BIN_PATH is set to: $FREEBUFF_BIN_PATH" >&2
+  command -v node >/dev/null 2>&1 || echo "node is also not on PATH; state reporting would not work." >&2
   exit 1
 fi
 
