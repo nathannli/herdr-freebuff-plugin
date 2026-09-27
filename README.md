@@ -141,6 +141,27 @@ drops the pin and re-resolves. A single mismatch is not treated as proof, since
 freebuff forking can change a pane's process group transiently; `unknown` — herdr
 unreadable, or the directory has no log yet — never counts against the pin.
 
+### One watcher per pane
+
+Several sweeps can run at once — herdr re-reads the startup hook after a
+restore, and a slow one can overlap a later one. Each sweep spawns a watcher
+candidate for every marked pane, and the candidates decide between themselves:
+the first one to create `watch-<pane_id>.pid` with an exclusive create (`set -C`)
+owns the pane, and the losers exit immediately without reporting anything,
+without a seq counter, and without touching herdr state.
+
+The sweep's own pidfile check is only a cheap pre-check to avoid spawning a
+watcher that would instantly exit. It cannot be the thing that prevents a
+double-attach: read-then-write loses every race by definition.
+
+This matters because two watchers on one pane share one seq counter. Their
+`--seq` values interleave, herdr drops the out-of-order reports, and the pane
+goes quiet for reasons that look like the original outage.
+
+A slot naming a live process blocks a claim; a slot naming a dead one is
+reclaimed, so a pane whose watcher was killed can still be re-attached. A slot
+with no readable pid is a writer mid-update and is left alone.
+
 ### Surviving a herdr restart
 
 A watcher dies with the pane's process tree, so a server restart used to leave

@@ -175,3 +175,124 @@ fi
 rm -rf "$SWEEP_HOME"
 unset HERDR_PLUGIN_STATE_DIR HERDR_ENV HERDR_SOCKET_PATH HERDR_PLUGIN_ROOT
 unset HERDR_STUB_PANES HERDR_STUB_PANE_PROCS HERDR_STUB_PANE_CWD
+
+# --- concurrent sweeps must not double-attach ---
+
+t_title "attach-watches: concurrent sweeps leave exactly one live watcher per pane"
+# Regression: the sweep read the pidfile, ran `kill -0`, and then spawned. Two
+# concurrent sweeps both saw no live watcher, both passed the check, and two
+# watchers shared one pane. They then raced on the seq file, so their --seq
+# values interleaved and herdr dropped the out-of-order reports.
+#
+# Every sweep still spawns a candidate; the watcher claims the pane for itself
+# with an exclusive create and the losers exit. So the invariant to assert is
+# one *live* watcher afterwards, not one spawn. Counting spawns would be wrong
+# by design under overlapping sweeps.
+RACE_HOME=$(mktemp -d)
+RACE_STATE="$RACE_HOME/state"
+mkdir -p "$RACE_STATE"
+export HERDR_PLUGIN_STATE_DIR="$RACE_STATE"
+export HERDR_ENV=1
+export HERDR_PANE_ID="test-pane-1"
+export HERDR_SOCKET_PATH="/tmp/fake.sock"
+export HERDR_PLUGIN_ROOT="$PROJECT_ROOT"
+export HERDR_STUB_PANES="w1:p1"
+: > "$RACE_STATE/owned-w1:p1"
+RACE_FB=$$
+export HERDR_STUB_PANE_PROCS="${RACE_FB}:/usr/local/bin/freebuff"
+export HERDR_STUB_PANE_CWD="/Users/someone/dev/attachproj"
+export HERDR_BIN_PATH="$PROJECT_ROOT/tests/fixtures/herdr-stub.sh"
+export HERDR_CALL_LOG="$RACE_HOME/calls.log"
+: > "$HERDR_CALL_LOG"
+
+for _n in 1 2 3 4 5 6; do
+  ( sh "$PROJECT_ROOT/scripts/attach-watches.sh" >/dev/null 2>&1 ) &
+done
+wait
+# Long enough for the winner to get through its first polls and create state.
+sleep 4
+
+live_watchers=0
+for _pf in "$RACE_STATE"/watch-*.pid; do
+  [ -f "$_pf" ] || continue
+  _p=$(tr -dc '0-9' < "$_pf" 2>/dev/null)
+  [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null && live_watchers=$((live_watchers + 1))
+done
+t_is "1" "$live_watchers" "one live watcher for the pane, not several"
+
+# One seq file too. Two watchers on one pane would each keep their own view of
+# the same counter, which is exactly what makes herdr drop reports.
+t_is "1" "$(ls "$RACE_STATE" | grep -c '^seq-' || echo 0)" "one seq file for the pane"
+
+# The real consequence of a double-attach: two watchers share one seq counter,
+# so their reports interleave and herdr drops the ones that arrive out of order.
+# The winner alone reports, so every seq it sends must strictly increase.
+seqs=$(grep -o -- "--seq [0-9]*" "$HERDR_CALL_LOG" 2>/dev/null | awk '{print $2}')
+strictly_increasing=$(printf '%s\n' "$seqs" | awk '
+  NR == 1 { prev = $1; next }
+  { if ($1 <= prev) { print "NO"; exit } prev = $1 }
+  END { if (NR > 1) print "YES"; else print "NONE" }')
+if [ "$strictly_increasing" = "NONE" ] || [ "$strictly_increasing" = "YES" ]; then
+  t_pass "reported seq numbers strictly increase ($strictly_increasing)"
+else
+  t_fail "seq numbers went backwards, so two watchers share the counter"
+fi
+
+if [ -f "$RACE_STATE/watch-w1:p1.pid" ]; then
+  kill "$(tr -dc '0-9' < "$RACE_STATE/watch-w1:p1.pid" 2>/dev/null)" 2>/dev/null || true
+fi
+rm -rf "$RACE_HOME"
+unset HERDR_PLUGIN_STATE_DIR HERDR_ENV HERDR_SOCKET_PATH HERDR_PLUGIN_ROOT
+unset HERDR_STUB_PANES HERDR_STUB_PANE_PROCS HERDR_STUB_PANE_CWD
+unset HERDR_BIN_PATH HERDR_CALL_LOG
+
+# --- the claim primitive on its own ---
+
+t_title "claim_watch_slot: a second claim on a live slot is refused"
+CLAIM_HOME=$(mktemp -d)
+export HERDR_PLUGIN_STATE_DIR="$CLAIM_HOME"
+# Claim from this shell, not a subshell: the slot records the caller's pid, and
+# a subshell's pid dies with the subshell, so a claim made in one would look
+# stale to the next.
+. "$PROJECT_ROOT/scripts/common.sh"
+if claim_watch_slot "w1:p9"; then
+  t_pass "first claim on a free slot succeeds"
+else
+  t_fail "first claim on a free slot should succeed"
+fi
+t_is "$$" "$(tr -dc '0-9' < "$CLAIM_HOME/watch-w1:p9.pid")" "slot records the claiming pid"
+# A different shell, but the holder (this one) is still alive.
+if ( . "$PROJECT_ROOT/scripts/common.sh"; claim_watch_slot "w1:p9" ) 2>/dev/null; then
+  t_fail "second claim on a live slot should be refused"
+else
+  t_pass "second claim on a live slot is refused"
+fi
+rm -f "$CLAIM_HOME/watch-w1:p9.pid"
+rm -rf "$CLAIM_HOME"
+unset HERDR_PLUGIN_STATE_DIR
+
+t_title "claim_watch_slot: a slot naming a dead process is reclaimed"
+DEAD_HOME=$(mktemp -d)
+export HERDR_PLUGIN_STATE_DIR="$DEAD_HOME"
+# A pid that cannot be running, as left by a sweep that died before recording
+# its watcher.
+printf '%s' "999999" > "$DEAD_HOME/watch-w1:p9.pid"
+if ( . "$PROJECT_ROOT/scripts/common.sh"; claim_watch_slot "w1:p9" ) 2>/dev/null; then
+  t_pass "stale claim from a dead holder is taken over"
+else
+  t_fail "a dead holder should not block re-attachment forever"
+fi
+rm -rf "$DEAD_HOME"
+unset HERDR_PLUGIN_STATE_DIR
+
+t_title "claim_watch_slot: an empty slot is not treated as stale"
+EMPTY_HOME=$(mktemp -d)
+export HERDR_PLUGIN_STATE_DIR="$EMPTY_HOME"
+: > "$EMPTY_HOME/watch-w1:p9.pid"
+if ( . "$PROJECT_ROOT/scripts/common.sh"; claim_watch_slot "w1:p9" ) 2>/dev/null; then
+  t_fail "an empty slot means a writer is mid-update; stealing it double-attaches"
+else
+  t_pass "empty slot is left alone"
+fi
+rm -rf "$EMPTY_HOME"
+unset HERDR_PLUGIN_STATE_DIR

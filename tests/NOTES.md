@@ -91,6 +91,34 @@ and `date -j -f %Y%m%d%H%M` does not agree with `touch -t` to the second. A
 fixture built from either one becomes a function of when the suite runs. Read
 the mtime back with `stat` and derive the floor from that.
 
+## One watcher per pane
+Assert the *outcome*, not the spawn count. Under overlapping sweeps every sweep
+deliberately spawns a candidate and the losers exit, so counting spawns is
+counting something that is supposed to exceed one. The invariants that matter
+are one live watcher, one seq file, and a strictly increasing seq stream.
+
+The seq assertion is the one that actually catches the bug. Reverting just the
+watcher's claim leaves one live watcher by luck of timing but two watchers
+sharing the counter, which shows up as a seq that goes backwards. Checking
+"one live watcher" alone would have passed.
+
+Two designs failed before the current one, both measured:
+- Claiming on the sweeper's behalf and recording the spawned pid afterwards
+  gave 2 winners from 6 sweeps. The claim was held under the sweeper's pid,
+  which exits immediately, and reclaim was read-check-then-`rm`, so a loser
+  could delete the winner's new slot and win the recreate.
+- The fix is one exclusive create (`set -C`) performed by the watcher itself,
+  so there is no second step to race.
+
+`set -C` gives an atomic create, so the kernel picks the winner. Reading the
+holder to decide whether a slot is stale is inherently racy, which is why the
+reclaim path must end in the same exclusive create rather than trusting the
+read.
+
+`record_watch_slot` renames a written temporary over the slot. Plain `> file`
+truncates first, and a claimer that observed the empty window would refuse a
+valid slot, costing a re-attach.
+
 ## Session pinning
 The watcher pins one chat dir per pane and never re-resolves it, by writer pid.
 `make_fake_chat` therefore takes a writer pid and stamps it into `log.jsonl`,

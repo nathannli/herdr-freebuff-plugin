@@ -50,6 +50,65 @@ pane_is_live() {
   printf '%s\n' "$1" | grep -qxF "$2"
 }
 
+# Claim exclusive ownership of a pane's watcher slot.
+#
+# Returns 0 if the caller now owns the pane and must run a watcher, 1 if another
+# live watcher already owns it.
+#
+# The sweep used to read the pidfile, run `kill -0` on it, and then spawn. That
+# is check-then-act: two concurrent sweeps both see no live watcher, both pass,
+# and two watchers end up sharing one pane. They then race on the seq file, so
+# their --seq values interleave, herdr drops the out-of-order reports, and the
+# pane goes quiet for reasons that look like the original bug.
+#
+# The winner is decided by the kernel, not by a read. `set -C` makes the create
+# itself the test, so exactly one of N racing callers can create the file. An
+# earlier attempt claimed on the sweeper's behalf and recorded the spawned pid
+# afterwards; that failed because the recording was a second, unguarded step, and
+# a competing sweep could reclaim the slot in the gap. One atomic step, owned by
+# the process that will actually live in the slot, has no such gap.
+#
+# Only a slot naming a *live* process blocks a claim. A slot left by a killed
+# watcher is stale and must be reclaimable, or a pane could never be
+# re-attached.
+claim_watch_slot() {
+  _slot="${HERDR_PLUGIN_STATE_DIR}/watch-$1.pid"
+
+  if ( set -C; printf '%s' "$$" > "$_slot" ) 2>/dev/null; then
+    return 0
+  fi
+
+  _holder=$(tr -dc '0-9' < "$_slot" 2>/dev/null)
+  if [ -z "$_holder" ]; then
+    # A slot with no readable pid is a writer mid-update, not a dead claim.
+    # Stealing it would hand two watchers the same pane.
+    return 1
+  fi
+
+  kill -0 "$_holder" 2>/dev/null && return 1
+
+  # Stale: the previous watcher was killed and left this behind. Remove it and
+  # let the exclusive create arbitrate, so only one of several sweeps reclaims.
+  rm -f "$_slot" 2>/dev/null
+  ( set -C; printf '%s' "$$" > "$_slot" ) 2>/dev/null
+}
+
+# Replace a slot's contents without ever exposing an empty file.
+#
+# `> file` truncates before writing, so a concurrent claimer can observe a
+# zero-length slot. An empty slot reads as "writer mid-update" and is refused,
+# so this costs a re-attach rather than causing a double-attach. Renaming a
+# fully written temporary over the slot is atomic: a reader sees either the old
+# pid or the new one, never nothing.
+# Arguments: pane_id pid
+record_watch_slot() {
+  _slot="${HERDR_PLUGIN_STATE_DIR}/watch-$1.pid"
+  _tmp="${_slot}.tmp.$$"
+  printf '%s' "$2" > "$_tmp" 2>/dev/null || return 1
+  mv -f "$_tmp" "$_slot" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 1; }
+  return 0
+}
+
 # Remove per-pane state for panes herdr no longer lists, plus debug logs older
 # than a day.
 #

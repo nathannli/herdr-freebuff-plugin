@@ -37,8 +37,22 @@ SEQ_FILE="${STATE_DIR}/seq-${PANE_ID}"
 PID_FILE="${STATE_DIR}/watch-${PANE_ID}.pid"
 DEBUG_LOG="${STATE_DIR}/watcher-${PANE_ID}.log"
 
+# Claim this pane before doing anything else.
+#
+# Several sweeps can run at once and each spawns a candidate watcher, so this is
+# where a pane's single watcher is decided. The claim is an exclusive create, so
+# the kernel picks one winner: a losing watcher exits here having reported
+# nothing, written no seq counter, and touched no herdr state. It has to be the
+# watcher that claims rather than the sweep that spawns it, because the claim has
+# to be a single step performed by the process that will occupy the slot.
+claim_watch_slot "$PANE_ID" || exit 0
+
 # Let a restart sweep tell a live watcher from a dead one.
-printf '%s' "$$" > "$PID_FILE" 2>/dev/null
+#
+# Written atomically: a sweep reading this file mid-update must never see it
+# empty, because an empty slot is refused as a writer mid-update and would need
+# another sweep to fix.
+record_watch_slot "$PANE_ID" "$$"
 
 # Opt-in diagnostics: FREEBUFF_DEBUG=1 in the pane environment.
 log() {

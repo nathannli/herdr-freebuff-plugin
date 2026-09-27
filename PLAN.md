@@ -154,7 +154,7 @@ file-based state is stale during exactly the windows that matter.
 | `tests/launch.test.sh` | 8 (modes, watcher spawn guards, error cases) |
 | `tests/notify.test.sh` | 2 (sends notification, fails outside herdr) |
 | `tests/prune.test.sh` | 6 (orphan sweep, pane-id prefix safety, log pruning) |
-| `tests/attach.test.sh` | 16 (debounce gate, pid pinning, floor-gated fallback, pin re-validation, `pane_freebuff_pid`, sweep scope) |
+| `tests/attach.test.sh` | 20 (debounce gate, pid pinning, floor-gated fallback, pin re-validation, `pane_freebuff_pid`, sweep scope, concurrent-sweep race, claim primitive) |
 | `tests/watcher.test.sh` | 43 (classify matrix, `detect_screen_state`, `classify_signals`, `find_newest_chat`, `pane_project_slug`) |
 
 Each e2e phase resets the herdr-stub call log before asserting, so a state
@@ -171,6 +171,35 @@ accumulates per-suite failures instead of aborting on the first broken file.
 - **Watcher debug log**: set `FREEBUFF_DEBUG=1` in the pane, then read
   `<config dir>/watcher-<pane_id>.log`. Report failures are written to that same
   log, and to the pane's stderr, with no debug flag needed.
+
+## Decision E (locked in, 0.2.0)
+**One watcher per pane, arbitrated by an atomic claim held by the watcher
+itself.**
+
+The sweep used to read the pidfile, run `kill -0`, and then spawn. That is
+check-then-act: two concurrent sweeps both see no live watcher, both pass, and
+two watchers share a pane. They then race on the seq file, so their `--seq`
+values interleave, herdr drops the out-of-order reports, and the pane goes quiet
+for reasons indistinguishable from the original outage.
+
+Two designs were tried and measured before this one:
+
+1. **Claim on the sweeper's behalf, record the spawned pid afterwards.** Failed.
+   The claim was held under the sweeper's pid, which exits milliseconds later, so
+   a competing sweep could read a dead holder inside the claim-to-record window.
+   Reclaim was also read-check-then-`rm`, so a loser that had read the dead pid
+   could delete the winner's freshly recorded slot and win the recreate. Measured
+   at 2 winners from 6 concurrent sweeps.
+2. **The watcher claims for itself.** The claim is a single exclusive create
+   performed by the process that will occupy the slot, so there is no window to
+   race in. Measured at exactly 1 live watcher, 1 seq file, and a strictly
+   increasing seq stream from 6 concurrent sweeps.
+
+A slot naming a live process blocks a claim; a dead one is reclaimed so a killed
+watcher's pane can still be re-attached; an unreadable one is a writer
+mid-update and is left alone. The sweep's `attached N watcher(s)` line became
+`spawned N watcher candidate(s)`, because under overlapping sweeps the number of
+candidates is deliberately larger than the number of panes attached.
 
 ## Known limitations
 
