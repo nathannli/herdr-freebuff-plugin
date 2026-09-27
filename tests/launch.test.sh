@@ -3,7 +3,7 @@
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FAKEHOME=$(mktemp -d)
-mkdir -p "$FAKEHOME/.config/manicode/projects" "$FAKEHOME/bin" "$FAKEHOME/.local/bin"
+mkdir -p "$FAKEHOME/.config/manicode/projects" "$FAKEHOME/bin"
 ln -sf "$PROJECT_ROOT/tests/fixtures/herdr-stub.sh" "$FAKEHOME/bin/herdr"
 ln -sf "$PROJECT_ROOT/tests/fixtures/bin/freebuff" "$FAKEHOME/bin/freebuff"
 
@@ -16,10 +16,15 @@ export HERDR_STUB_LAST="/tmp/herdr-launch-test-last.txt"
 export HERDR_CALL_LOG="/tmp/herdr-launch-test-call.txt"
 : > "$HERDR_CALL_LOG"
 
+# Isolated plugin state dir so watcher seq files never touch the real one
+export HERDR_PLUGIN_STATE_DIR="$FAKEHOME/state"
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+
 t_title "launch.sh: task mode execs freebuff"
 (
   exec 2>/dev/null
-  HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" task > /dev/null 2>&1
+  HERDR_PANE_ID="pane-1" HERDR_ENV=1 HERDR_SOCKET_PATH="$FAKEHOME/herdr.sock" \
+    sh "$PROJECT_ROOT/scripts/launch.sh" task > /dev/null 2>&1
 ) &
 pid=$!
 sleep 0.3
@@ -33,7 +38,8 @@ fi
 t_title "launch.sh: resume-last mode passes --continue"
 (
   exec 2>/dev/null
-  HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" resume-last > /dev/null 2>&1
+  HERDR_PANE_ID="pane-1" HERDR_ENV=1 HERDR_SOCKET_PATH="$FAKEHOME/herdr.sock" \
+    sh "$PROJECT_ROOT/scripts/launch.sh" resume-last > /dev/null 2>&1
 ) &
 pid=$!
 sleep 0.3
@@ -47,7 +53,8 @@ fi
 t_title "launch.sh: resume-named passes session id"
 (
   exec 2>/dev/null
-  HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" resume-named "test-session-123" > /dev/null 2>&1
+  HERDR_PANE_ID="pane-1" HERDR_ENV=1 HERDR_SOCKET_PATH="$FAKEHOME/herdr.sock" \
+    sh "$PROJECT_ROOT/scripts/launch.sh" resume-named "test-session-123" > /dev/null 2>&1
 ) &
 pid=$!
 sleep 0.3
@@ -62,34 +69,63 @@ fi
 pkill -f "fake freebuff" 2>/dev/null || true
 sleep 0.3
 
-t_title "launch.sh: prefers ~/.local/bin/freebuff wrapper when present"
-# Create a wrapper that writes its invocation to a marker file
-marker=/tmp/launch-wrapper-marker.txt
-: > "$marker"
-cat > "$FAKEHOME/.local/bin/freebuff" <<'WRAPEOF'
-#!/bin/sh
-echo "WRAPPER_INVOKED:$*" > /tmp/launch-wrapper-marker.txt
-while true; do sleep 1; done
-WRAPEOF
-chmod +x "$FAKEHOME/.local/bin/freebuff"
-# Put .local/bin ahead in PATH (keep system dirs)
-export PATH="$FAKEHOME/.local/bin:$FAKEHOME/bin:$PATH"
+t_title "launch.sh: spawns the status watcher inside a herdr pane"
+pkill -f "status-watcher.sh" 2>/dev/null || true
+sleep 0.3
 (
   exec 2>/dev/null
-  HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" task > /dev/null 2>&1
+  HERDR_PANE_ID="pane-spawn" HERDR_ENV=1 HERDR_SOCKET_PATH="$FAKEHOME/herdr.sock" \
+    sh "$PROJECT_ROOT/scripts/launch.sh" task > /dev/null 2>&1
 ) &
 pid=$!
-sleep 0.5
-# The wrapper should have been invoked by launch.sh via exec -> writes to marker
-if grep -q "WRAPPER_INVOKED" "$marker" 2>/dev/null; then
-  t_pass "wrapper was invoked (cmdline: $(cat "$marker"))"
+sleep 0.8
+watcher_count=$(ps -ef | grep "status-watcher.sh" | grep -v grep | wc -l | tr -d ' ')
+if [ "$watcher_count" -ge 1 ]; then
+  t_pass "watcher spawned inside herdr (count: $watcher_count)"
 else
-  t_fail "wrapper was not invoked (marker content: $(cat "$marker" 2>/dev/null || echo '<empty>'))"
+  t_fail "watcher should spawn inside herdr (count: $watcher_count)"
 fi
 kill $pid 2>/dev/null
-rm -f "$marker"
-export PATH="$FAKEHOME/bin:$PATH"
-rm -f "$FAKEHOME/.local/bin/freebuff"
+pkill -f "status-watcher.sh" 2>/dev/null || true
+sleep 0.2
+
+t_title "launch.sh: no watcher outside a herdr pane"
+pkill -f "status-watcher.sh" 2>/dev/null || true
+sleep 0.3
+(
+  exec 2>/dev/null
+  HERDR_ENV= HERDR_PANE_ID= HERDR_SOCKET_PATH= \
+    sh "$PROJECT_ROOT/scripts/launch.sh" task > /dev/null 2>&1
+) &
+pid=$!
+sleep 0.8
+watcher_count=$(ps -ef | grep "status-watcher.sh" | grep -v grep | wc -l | tr -d ' ')
+if [ "$watcher_count" -eq 0 ]; then
+  t_pass "no watcher spawned outside herdr"
+else
+  t_fail "watcher should not spawn outside herdr (count: $watcher_count)"
+fi
+kill $pid 2>/dev/null
+pkill -f "status-watcher.sh" 2>/dev/null || true
+
+t_title "launch.sh: no watcher when the herdr socket is absent"
+# HERDR_ENV=1 with a pane id but no socket: herdr cannot receive reports, so
+# the watcher must not start.
+(
+  exec 2>/dev/null
+  HERDR_PANE_ID="pane-nosock" HERDR_ENV=1 HERDR_SOCKET_PATH= \
+    sh "$PROJECT_ROOT/scripts/launch.sh" task > /dev/null 2>&1
+) &
+pid=$!
+sleep 0.8
+watcher_count=$(ps -ef | grep "status-watcher.sh" | grep -v grep | wc -l | tr -d ' ')
+if [ "$watcher_count" -eq 0 ]; then
+  t_pass "no watcher spawned without a herdr socket"
+else
+  t_fail "watcher should not spawn without a herdr socket (count: $watcher_count)"
+fi
+kill $pid 2>/dev/null
+pkill -f "status-watcher.sh" 2>/dev/null || true
 
 t_title "launch.sh: resume-named fails without session id"
 output=$(HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" resume-named 2>&1 || true)
@@ -100,7 +136,8 @@ output=$(HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh"
 echo "$output" | grep -q "unknown launch mode" && t_pass "unknown mode rejected" || t_fail "unknown mode should be rejected"
 
 # Restore
+pkill -f "fake freebuff" 2>/dev/null || true
 rm -rf "$FAKEHOME" /tmp/herdr-launch-test-last.txt /tmp/herdr-launch-test-call.txt
 export HOME="$OLD_HOME"
 export PATH="$OLD_PATH"
-unset HERDR_STUB_LAST HERDR_CALL_LOG
+unset HERDR_STUB_LAST HERDR_CALL_LOG HERDR_PLUGIN_STATE_DIR

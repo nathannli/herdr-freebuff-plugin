@@ -71,10 +71,15 @@ make_fake_home() {
 }
 
 # Create a fake chat directory with state files.
-# Arguments: chat_dir, variant ("blocked" | "working" | "done" | "idle")
+# Arguments: chat_dir, variant, [writer_pid]
+#
+# The watcher pins a chat dir by the pid that wrote its log.jsonl, which is
+# what real freebuff stamps on every line. Tests that need a pin must pass
+# that pid and expose it to the herdr stub via HERDR_STUB_PANE_PIDS.
 make_fake_chat() {
   chat_dir="$1"
   variant="$2"
+  writer_pid="${3:-99999}"
   mkdir -p "$chat_dir"
 
   case "$variant" in
@@ -117,11 +122,11 @@ JSONEOF
 ]
 JSONEOF
       # Log has start but no finish
-      cat > "$chat_dir/log.jsonl" <<'JSONEOF'
-{"level":"INFO","timestamp":"2026-01-01T00:01:00.000Z","msg":"[send-message] Sending message"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:00.000Z","msg":"Start agent test-agent step 1 (run1)"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:05.000Z","msg":"End agent test-agent step 1 (run1)"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:10.000Z","msg":"Start agent test-agent step 2 (run1)"}
+      cat > "$chat_dir/log.jsonl" <<JSONEOF
+{"level":"INFO","timestamp":"2026-01-01T00:01:00.000Z","msg":"[send-message] Sending message","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:00.000Z","msg":"Start agent test-agent step 1 (run1)","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:05.000Z","msg":"End agent test-agent step 1 (run1)","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:10.000Z","msg":"Start agent test-agent step 2 (run1)","pid":$writer_pid}
 JSONEOF
       cat > "$chat_dir/chat-meta.json" <<'JSONEOF'
 {"messageCount":3,"firstPrompt":"hello","messagesSize":300,"messagesMtimeMs":2000}
@@ -135,11 +140,11 @@ JSONEOF
   {"id":"ai-1","variant":"ai","content":"","blocks":[{"type":"text","content":"done"}],"timestamp":"00:02 AM"}
 ]
 JSONEOF
-      cat > "$chat_dir/log.jsonl" <<'JSONEOF'
-{"level":"INFO","timestamp":"2026-01-01T00:01:00.000Z","msg":"[send-message] Sending message"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:00.000Z","msg":"Start agent test-agent step 1 (run1)"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:05.000Z","msg":"End agent test-agent step 1 (run1)"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:10.000Z","msg":"Main prompt finished"}
+      cat > "$chat_dir/log.jsonl" <<JSONEOF
+{"level":"INFO","timestamp":"2026-01-01T00:01:00.000Z","msg":"[send-message] Sending message","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:00.000Z","msg":"Start agent test-agent step 1 (run1)","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:05.000Z","msg":"End agent test-agent step 1 (run1)","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:10.000Z","msg":"Main prompt finished","pid":$writer_pid}
 JSONEOF
       cat > "$chat_dir/chat-meta.json" <<'JSONEOF'
 {"messageCount":3,"firstPrompt":"hello","messagesSize":300,"messagesMtimeMs":3000}
@@ -156,11 +161,11 @@ JSONEOF
 ]
 JSONEOF
       # Log has finish AFTER the last start — turn is done
-      cat > "$chat_dir/log.jsonl" <<'JSONEOF'
-{"level":"INFO","timestamp":"2026-01-01T00:01:00.000Z","msg":"[send-message] Sending message"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:00.000Z","msg":"Start agent test-agent step 1 (run1)"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:05.000Z","msg":"End agent test-agent step 1 (run1)"}
-{"level":"INFO","timestamp":"2026-01-01T00:02:10.000Z","msg":"Main prompt finished"}
+      cat > "$chat_dir/log.jsonl" <<JSONEOF
+{"level":"INFO","timestamp":"2026-01-01T00:01:00.000Z","msg":"[send-message] Sending message","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:00.000Z","msg":"Start agent test-agent step 1 (run1)","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:05.000Z","msg":"End agent test-agent step 1 (run1)","pid":$writer_pid}
+{"level":"INFO","timestamp":"2026-01-01T00:02:10.000Z","msg":"Main prompt finished","pid":$writer_pid}
 JSONEOF
       cat > "$chat_dir/chat-meta.json" <<'JSONEOF'
 {"messageCount":3,"firstPrompt":"hello","messagesSize":300,"messagesMtimeMs":3000}
