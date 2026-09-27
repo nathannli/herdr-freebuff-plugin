@@ -58,14 +58,67 @@ export HERDR_STUB_PANE_PIDS="$OTHERS"
 result=$(pin_own_chat_dir "w1:p1" "attachproj" 0)
 t_is "$CHATS/2026-01-01T09-00-00.000Z" "$result" "follows the pid herdr reports"
 
-t_title "pin_own_chat_dir: falls back to newest when no pid matches yet"
+t_title "pin_own_chat_dir: a zero floor refuses the newest-dir fallback"
+# Regression: a floor of 0 means a resumed session or a restart re-attach, and
+# "newest dir" cannot identify those. An idle session stops touching its dir, so
+# any other active session in the same project is newer and would take over the
+# state. No pin is correct here; a wrong pin is not.
 mkdir -p "$CHATS/2026-01-01T11-00-00.000Z"
 printf '{"msg":"Start agent z","pid":777777}\n' \
   > "$CHATS/2026-01-01T11-00-00.000Z/log.jsonl"
 touch -t 202601010003 "$CHATS/2026-01-01T11-00-00.000Z"
 export HERDR_STUB_PANE_PIDS="555555"
 result=$(pin_own_chat_dir "w1:p1" "attachproj" 0)
-t_is "$CHATS/2026-01-01T11-00-00.000Z" "$result" "no pid match falls back to newest"
+t_is "" "$result" "zero floor with no pid match yields no pin, not the newest dir"
+
+t_title "pin_own_chat_dir: a new-session floor still allows the mtime fallback"
+# A brand-new session's dir is provably its own because the floor proves it was
+# created after this pane launched. freebuff has not written its first log line
+# yet, so this covers the first second or two of a session's life.
+#
+# Timestamps are fixed and in the past: BSD touch silently clamps a future
+# timestamp to the current time, which would make the fixture's ordering a
+# function of when the suite runs.
+NEW_SLUG="floorproj"
+FLOOR_CHATS="$FAKEHOME/.config/manicode/projects/$NEW_SLUG/chats"
+mkdir -p "$FLOOR_CHATS/2026-01-01T12-00-00.000Z"
+printf '{"msg":"Start agent new","pid":666666}\n' \
+  > "$FLOOR_CHATS/2026-01-01T12-00-00.000Z/log.jsonl"
+touch -t 202602010000 "$FLOOR_CHATS/2026-01-01T12-00-00.000Z"
+# Floor is one second before the dir's mtime, in ms, as launch.sh supplies it.
+# Read the mtime back rather than recomputing it from the timestamp: `date -j -f`
+# and `touch -t` do not agree to the second here, and the fixture only works if
+# the floor really is below the dir.
+DIR_MTIME_S=$(stat -f %m "$FLOOR_CHATS/2026-01-01T12-00-00.000Z" 2>/dev/null || \
+  stat -c %Y "$FLOOR_CHATS/2026-01-01T12-00-00.000Z")
+FLOOR_MS=$(( DIR_MTIME_S * 1000 - 1000 ))
+result=$(pin_own_chat_dir "w1:p1" "$NEW_SLUG" "$FLOOR_MS")
+t_is "$FLOOR_CHATS/2026-01-01T12-00-00.000Z" "$result" "non-zero floor falls back to newest"
+
+# --- re-validating an established pin ---
+
+t_title "chat_dir_still_ours: yes when the pane's pid wrote the dir"
+export HERDR_STUB_PANE_PIDS="$MYPID"
+t_is "yes" "$(chat_dir_still_ours "w1:p1" "$CHATS/2026-01-01T00-00-00.000Z")" \
+  "our own pid still writes the dir"
+
+t_title "chat_dir_still_ours: no when only another pid writes the dir"
+export HERDR_STUB_PANE_PIDS="555555"
+t_is "no" "$(chat_dir_still_ours "w1:p1" "$CHATS/2026-01-01T00-00-00.000Z")" \
+  "a dir written by another pid is not ours"
+
+t_title "chat_dir_still_ours: unknown when the pane cannot be read"
+# Not a mismatch: herdr failing to answer is not evidence the pin went bad, and
+# treating it as one would unpin a correct pin on every hiccup.
+export HERDR_STUB_PANE_PIDS=""
+t_is "unknown" "$(chat_dir_still_ours "w1:p1" "$CHATS/2026-01-01T00-00-00.000Z")" \
+  "unreadable pane is unknown, not a mismatch"
+
+t_title "chat_dir_still_ours: unknown when the dir has no log yet"
+export HERDR_STUB_PANE_PIDS="$MYPID"
+mkdir -p "$CHATS/2026-01-01T13-00-00.000Z"
+t_is "unknown" "$(chat_dir_still_ours "w1:p1" "$CHATS/2026-01-01T13-00-00.000Z")" \
+  "a dir with no log.jsonl has no writer to compare"
 
 t_title "pin_own_chat_dir: no pids in the pane yields no pin"
 export HERDR_STUB_PANE_PIDS=""

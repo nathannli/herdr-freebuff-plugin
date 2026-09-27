@@ -27,8 +27,8 @@ Custom lifecycle reporting explicitly does not require a recognised agent
 executable, so the override was never needed.
 
 ## Decision D (locked in, 0.2.0)
-The watcher **pins one chat dir per pane and never re-resolves it**, and it pins
-by **writer pid**.
+The watcher **pins one chat dir per pane by writer pid, and re-checks the pin
+rather than trusting it forever**.
 
 "Newest chat dir" is not a stable identity. An idle session stops touching its
 dir, so any other freebuff session still writing to its own dir becomes "newest"
@@ -47,12 +47,29 @@ ignored.
 
 Supporting layers, in order of how much they matter:
 
-1. **Writer-pid match** (load-bearing). Falls back to newest-by-mtime only when
-   the pane's freebuff has not written a log line yet.
+1. **Writer-pid match** (load-bearing). Falls back to newest-by-mtime only for a
+   brand-new session that has not written a log line yet.
 2. **Project slug.** The pane's working directory, via `herdr pane get`.
 3. **mtime floor.** `launch.sh` passes `Date.now()` for a new session. A resumed
    session passes `0`, because it legitimately reuses a dir created earlier.
    Compared at second resolution, since `stat` only resolves whole seconds.
+
+A floor of `0` disables the newest-by-mtime fallback entirely. `resume-last`,
+`resume-named`, and every restart re-attach all pass `0`, and "newest" cannot
+identify a resumed session: an idle session stops touching its dir, so a
+concurrently active session in the same project is newer. Those panes report
+`idle` until a pid match appears. That is the right trade, because a missing pin
+self-heals the moment freebuff writes its first log line whereas a wrong pin
+reports another session's state indefinitely.
+
+A pin is a snapshot, so it is re-checked: every `FREEBUFF_PIN_RECHECK_POLLS`
+polls (default 10) the watcher confirms the pane's pids still intersect the
+directory's writer pids, and drops the pin after `FREEBUFF_PIN_LOSS_POLLS`
+consecutive mismatches (default 3). Debounced, because freebuff forking can
+change a pane's process group transiently and a single bad poll must not cost a
+working session its pin. `unknown` — herdr unreadable, or no log in the directory
+yet — never counts against the pin, so a herdr hiccup cannot unpin a correct
+pin.
 
 ## Architecture
 
@@ -137,7 +154,7 @@ file-based state is stale during exactly the windows that matter.
 | `tests/launch.test.sh` | 8 (modes, watcher spawn guards, error cases) |
 | `tests/notify.test.sh` | 2 (sends notification, fails outside herdr) |
 | `tests/prune.test.sh` | 6 (orphan sweep, pane-id prefix safety, log pruning) |
-| `tests/attach.test.sh` | 11 (debounce gate, pid pinning, `pane_freebuff_pid`, sweep scope) |
+| `tests/attach.test.sh` | 16 (debounce gate, pid pinning, floor-gated fallback, pin re-validation, `pane_freebuff_pid`, sweep scope) |
 | `tests/watcher.test.sh` | 43 (classify matrix, `detect_screen_state`, `classify_signals`, `find_newest_chat`, `pane_project_slug`) |
 
 Each e2e phase resets the herdr-stub call log before asserting, so a state
@@ -163,10 +180,12 @@ All were confirmed against a live herdr 0.9.1 server, not inferred.
   shows `agent_status: unknown` in herdr. There is no watcher for it. Verified:
   a manually started freebuff pane reports `agent: None`, `status: unknown`,
   while a plugin-opened pane reports `agent: freebuff`, `status: idle`.
-- **`resume-last` has no mtime floor**, so a resumed pane pins whichever chat
-  dir is newest at that moment. If a different session is mid-turn in the same
-  project, a resumed pane can pin the wrong dir. Unambiguous pinning needs
-  freebuff to expose its session id on the command line.
+- **A resumed pane can sit at `idle` before it pins.** `resume-last` and
+  `resume-named` pass a floor of `0`, which disables the newest-by-mtime
+  fallback, because "newest" cannot identify a resumed session and a wrong pin
+  is worse than none. The pane reports `idle` until freebuff writes a log line
+  carrying its pid, which is immediate in practice but is a real window. Closing
+  it entirely needs freebuff to expose its session id on the command line.
 - **No native session identity is reported**, so herdr cannot auto-resume a
   freebuff pane after a server restart. `resume_agents_on_restore` has nothing
   to resume from until the plugin reports `--agent-session-id`.

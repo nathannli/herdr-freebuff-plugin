@@ -143,17 +143,37 @@ fi
 
 log "watcher start pane=$PANE_ID freebuff_pid=$FREEBUFF_PID interval=$POLL_INTERVAL"
 
-# Pin this pane to exactly one chat dir, once.
+# Pin this pane to exactly one chat dir, and keep checking that it still holds.
 #
 # The pin is by writer pid, not by "newest dir". Newest-by-mtime is not a stable
 # identity: an idle session stops touching its dir, so any other freebuff
 # session still writing becomes newest and hijacks this pane's state. Measured
 # on a live server, an idle pane flipped to working and stayed there for 76
 # polls because an unrelated session was mid-turn.
+#
+# The pin is also not trusted forever: see PIN_RECHECK_POLLS below.
 PROJECT_SLUG=$(pane_project_slug "$PANE_ID")
 log "project_slug=${PROJECT_SLUG:-<unresolved>} min_created_ms=$MIN_CREATED_MS"
 
 CHAT_DIR=""
+# Consecutive polls that found the pinned dir was no longer being written by
+# this pane, before the pin is dropped and re-resolved.
+#
+# Debounced because a mismatch is not proof on its own: freebuff forks, the
+# pane's foreground process group changes, and `pane process-info` can report a
+# transient set of pids. A single bad poll must not cost a working session its
+# pin, and a genuine hijack is corrected within a couple of seconds anyway.
+PIN_LOSS_POLLS="${FREEBUFF_PIN_LOSS_POLLS:-3}"
+PIN_LOSS_STREAK=0
+
+# How often to re-check a pin that is already established.
+#
+# Re-checking costs one `pane process-info` call, so it runs on a slow cadence
+# rather than every poll. The check exists because a pin is a snapshot: freebuff
+# can be restarted inside the pane, or the pin can be wrong from the moment it is
+# taken, and without a re-check that wrongness is permanent.
+PIN_RECHECK_POLLS="${FREEBUFF_PIN_RECHECK_POLLS:-10}"
+POLLS_SINCE_PIN_CHECK=0
 
 # --- Main loop ---
 label
@@ -173,13 +193,37 @@ while kill -0 "$FREEBUFF_PID" 2>/dev/null; do
     candidate=$(pin_own_chat_dir "$PANE_ID" "$PROJECT_SLUG" "$MIN_CREATED_MS")
     if [ -n "$candidate" ]; then
       CHAT_DIR="$candidate"
+      PIN_LOSS_STREAK=0
       log "pinned chat_dir=$CHAT_DIR (watching pid $FREEBUFF_PID)"
     fi
   elif [ ! -d "$CHAT_DIR" ]; then
     log "pinned chat dir disappeared, re-pinning"
     CHAT_DIR=""
+    PIN_LOSS_STREAK=0
     sleep "$POLL_INTERVAL"
     continue
+  else
+    POLLS_SINCE_PIN_CHECK=$(( POLLS_SINCE_PIN_CHECK + 1 ))
+    if [ "$POLLS_SINCE_PIN_CHECK" -ge "$PIN_RECHECK_POLLS" ]; then
+      POLLS_SINCE_PIN_CHECK=0
+      verdict=$(chat_dir_still_ours "$PANE_ID" "$CHAT_DIR")
+      case "$verdict" in
+        no)
+          PIN_LOSS_STREAK=$(( PIN_LOSS_STREAK + 1 ))
+          log "pinned chat_dir no longer written by this pane ($PIN_LOSS_STREAK/$PIN_LOSS_POLLS): $CHAT_DIR"
+          if [ "$PIN_LOSS_STREAK" -ge "$PIN_LOSS_POLLS" ]; then
+            log "dropping stale pin, re-resolving"
+            CHAT_DIR=""
+            PIN_LOSS_STREAK=0
+          fi
+          ;;
+        *)
+          # yes, or unknown: nothing to act on. unknown means herdr could not
+          # tell us, which is not evidence the pin went bad.
+          PIN_LOSS_STREAK=0
+          ;;
+      esac
+    fi
   fi
 
   if [ -z "$CHAT_DIR" ]; then
