@@ -4,8 +4,9 @@
 #
 # Requires common.sh (for herdr_cmd) to be sourced first.
 #
-# Provides: classify, classify_signals, detect_screen_state, find_newest_chat,
-#           pane_project_slug, pane_pids, pin_own_chat_dir, should_report_state
+# Provides: classify, classify_signals, chat_dir_still_ours, detect_screen_state,
+#           find_newest_chat, pane_project_slug, pane_pids, pin_own_chat_dir,
+#           should_report_state
 
 # How many consecutive `idle` observations are required before dropping out of a
 # non-idle state. A single failed pane read, or one transient screen frame, can
@@ -269,10 +270,53 @@ pin_own_chat_dir() {
     done
   done
 
-  # No pid match yet. A brand-new session creates its dir and writes its first
-  # log line within a second or two of launch, so this only helps the window
-  # before that happens.
+  # No pid match. Only a brand-new session may fall back to mtime, and only
+  # because its floor proves the dir was created after this pane launched.
+  #
+  # A floor of 0 (both resume modes, and every restart re-attach) gets no
+  # fallback at all. "Newest dir" cannot identify a resumed session: an idle
+  # session stops touching its dir, so any other concurrently active session in
+  # the same project is newer and takes over the state. A wrong pin is worse
+  # than no pin, because a missing pin self-heals the moment freebuff writes its
+  # first log line, while a wrong one reports another session's state forever.
+  [ "$_floor" -gt 0 ] 2>/dev/null || return 0
   find_newest_chat "$_slug" "$_floor"
+}
+
+# Is the chat dir still being written by a process in this pane?
+#
+# Prints one of:
+#   yes      the pane's pids and the dir's writer pids intersect
+#   no       both sides are known and they do not intersect
+#   unknown  either side could not be read, or the dir has no log yet
+#
+# `unknown` is deliberately not a failure. A pane whose process-info call failed
+# has told us nothing, and treating that as a mismatch would unpin a correct pin
+# every time herdr hiccups.
+#
+# Arguments: pane_id chat_dir
+chat_dir_still_ours() {
+  _pane_id="$1"
+  _chat_dir="$2"
+
+  [ -n "$_pane_id" ] && [ -n "$_chat_dir" ] || { printf unknown; return 0; }
+
+  _dir_pids=$(chat_dir_pids "$_chat_dir" | tr '\n' ' ')
+  [ -n "$_dir_pids" ] || { printf unknown; return 0; }
+
+  _own_pids=$(pane_pids "$_pane_id" | tr '\n' ' ')
+  [ -n "$_own_pids" ] || { printf unknown; return 0; }
+
+  for _pid in $_dir_pids; do
+    case " $_own_pids " in
+      *" $_pid "*)
+        printf yes
+        return 0
+        ;;
+    esac
+  done
+
+  printf no
 }
 
 # Read pane screen content and classify the on-screen state.

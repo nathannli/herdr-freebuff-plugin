@@ -114,18 +114,32 @@ real `freebuff` binary.
 
 ### Session pinning
 
-Each pane pins **one** chat directory and never re-resolves it. "Newest chat
-dir" is not a stable identity: an idle session stops touching its dir, so any
-other freebuff session still writing to its own dir becomes "newest" and takes
-over this pane's reported state. Measured on a live server, an idle pane flipped
-to `working` and stayed there for 76 polls because an unrelated session was
-mid-turn.
+Each pane pins **one** chat directory. "Newest chat dir" is not a stable
+identity: an idle session stops touching its dir, so any other freebuff session
+still writing to its own dir becomes "newest" and takes over this pane's
+reported state. Measured on a live server, an idle pane flipped to `working` and
+stayed there for 76 polls because an unrelated session was mid-turn.
 
 The pin is by **writer pid**. Freebuff stamps every `log.jsonl` line with the pid
 that wrote it, and `herdr pane process-info` reports the pids in a pane; the
-watcher intersects the two. No cooperation from freebuff is needed. Newest-by-mtime
-is only the fallback for the moment before a session's first log line exists, and
-it is backed by the pane's project slug and a launch-time mtime floor.
+watcher intersects the two. No cooperation from freebuff is needed.
+
+Newest-by-mtime is the fallback only for a **brand-new** session, in the moment
+before its first log line exists, and only because the mtime floor `launch.sh`
+passes proves the directory was created after the pane launched. A floor of `0`
+— both resume modes, and every restart re-attach — gets no fallback at all.
+"Newest" cannot identify a resumed session, so those panes wait for a pid match
+and report `idle` until one appears. No pin is the correct answer there: a
+missing pin self-heals the moment freebuff writes its first log line, while a
+wrong pin reports another session's state indefinitely.
+
+The pin is also **re-checked**, because a pin is a snapshot and can be wrong
+from the moment it is taken. Every `FREEBUFF_PIN_RECHECK_POLLS` polls (default
+10) the watcher confirms the pane's pids still intersect the directory's writer
+pids. After `FREEBUFF_PIN_LOSS_POLLS` consecutive mismatches (default 3) it
+drops the pin and re-resolves. A single mismatch is not treated as proof, since
+freebuff forking can change a pane's process group transiently; `unknown` — herdr
+unreadable, or the directory has no log yet — never counts against the pin.
 
 ### Surviving a herdr restart
 

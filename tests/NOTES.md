@@ -68,6 +68,29 @@ Each e2e phase truncates the herdr-stub call log before acting, so an assertion
 can only be satisfied by a report made during that phase. The watcher needs up
 to one poll interval to react, so each phase waits 3s.
 
+## Pin re-validation
+A pin is a snapshot, so the watcher re-checks it: every
+`FREEBUFF_PIN_RECHECK_POLLS` polls it confirms the pane's pids still intersect
+the pinned directory's writer pids, and after `FREEBUFF_PIN_LOSS_POLLS`
+consecutive mismatches it drops the pin and re-resolves.
+
+`chat_dir_still_ours` prints `unknown` rather than `no` when either side cannot
+be read, and `unknown` never counts against the pin. Without that distinction a
+herdr hiccup — or a `pane process-info` that returns nothing while the pane is
+busy — would unpin a correct pin. The re-check runs on a slow cadence rather
+than every poll because each one is a herdr call.
+
+The mtime fallback is gated on a non-zero floor. `resume-last`, `resume-named`,
+and every restart re-attach all pass `0`, and "newest dir" cannot identify a
+resumed session, so those panes must wait for a pid match rather than risk
+another session's state. The test for this asserts the fallback returns *empty*
+with floor `0`; the "falls back to newest" case now needs a real floor.
+
+`touch -t` with a future timestamp silently clamps to the current time on BSD,
+and `date -j -f %Y%m%d%H%M` does not agree with `touch -t` to the second. A
+fixture built from either one becomes a function of when the suite runs. Read
+the mtime back with `stat` and derive the floor from that.
+
 ## Session pinning
 The watcher pins one chat dir per pane and never re-resolves it, by writer pid.
 `make_fake_chat` therefore takes a writer pid and stamps it into `log.jsonl`,
