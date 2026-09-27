@@ -152,11 +152,12 @@ accumulates per-suite failures instead of aborting on the first broken file.
 - **Plugin logs**: `herdr plugin log list --plugin freebuff.integration`
 - **Config dir**: `herdr plugin config-dir freebuff.integration`
 - **Watcher debug log**: set `FREEBUFF_DEBUG=1` in the pane, then read
-  `<config dir>/watcher-<pane_id>.log`
+  `<config dir>/watcher-<pane_id>.log`. Report failures are written to that same
+  log, and to the pane's stderr, with no debug flag needed.
 
 ## Known limitations
 
-All four were confirmed against a live herdr 0.9.1 server, not inferred.
+All were confirmed against a live herdr 0.9.1 server, not inferred.
 
 - **Only plugin-launched panes report state.** A freebuff started any other way
   shows `agent_status: unknown` in herdr. There is no watcher for it. Verified:
@@ -166,15 +167,18 @@ All four were confirmed against a live herdr 0.9.1 server, not inferred.
   dir is newest at that moment. If a different session is mid-turn in the same
   project, a resumed pane can pin the wrong dir. Unambiguous pinning needs
   freebuff to expose its session id on the command line.
-- **The watcher cannot clean up when its pane is closed.** Herdr tears the
-  pane's whole process group down with SIGKILL, which no shell trap intercepts;
-  the watcher dies with no cleanup log line and its seq file survives. The
-  release itself is not needed in that case because herdr drops the agent with
-  the pane. Orphans are swept by `prune_orphan_state()`, which runs both from the
-  startup hook and at every watcher startup, so they never accumulate.
 - **No native session identity is reported**, so herdr cannot auto-resume a
   freebuff pane after a server restart. `resume_agents_on_restore` has nothing
   to resume from until the plugin reports `--agent-session-id`.
+- **A watcher that loses herdr gives up rather than retrying forever.** It counts
+  consecutive `report-agent` failures, logs them unconditionally, and exits at
+  `FREEBUFF_REPORT_FAILURE_LIMIT` (default 5) so the startup hook re-attaches it
+  against the new server. A brief blip is survivable because the counter resets
+  on the first success. A watcher that instead kept polling would sit on a stale
+  socket and a stale seq counter indefinitely, which is the silent-failure mode
+  that made the original outage hard to diagnose. The cost is that a herdr
+  restart longer than ~5 polls leaves a pane unwatched until the startup hook
+  runs again.
 - **Detection is a poll, not a subscription.** `events.subscribe` on
   `pane.agent_status_changed` would be event-driven, but freebuff exposes no
   hooks to drive it.
@@ -184,3 +188,4 @@ All four were confirmed against a live herdr 0.9.1 server, not inferred.
   herdr drops the agent with the pane. `prune_orphan_state()` sweeps the
   leftovers from the startup hook and at every watcher startup, so they never
   accumulate.
+

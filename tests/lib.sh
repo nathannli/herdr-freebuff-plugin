@@ -49,7 +49,7 @@ t_file_contains() {
   if grep -q "$pattern" "$file" 2>/dev/null; then
     t_pass "$msg"
   else
-    t_fail "$msg (pattern not found in $1)"
+    t_fail "$msg (pattern not found in $1; contents: $(cat "$file" 2>&1 | head -20))"
   fi
 }
 

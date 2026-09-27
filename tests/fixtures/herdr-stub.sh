@@ -51,6 +51,11 @@ case "$subcmd" in
           echo "ERROR: stub missing required --source/--agent/--state" >&2
           exit 1
         fi
+        # Models a dead or restarted herdr server: every report is refused.
+        if [ -n "${HERDR_STUB_FAIL_REPORT:-}" ]; then
+          echo "ERROR: stub simulating unreachable herdr server" >&2
+          exit 1
+        fi
         echo "ok report-agent $state seq=$seq"
         ;;
       release-agent)

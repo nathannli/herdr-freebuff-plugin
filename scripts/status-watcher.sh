@@ -48,6 +48,19 @@ log() {
   return 0
 }
 
+# Unconditional logging, for the case where the watcher has lost herdr.
+#
+# `log` is debug-gated because a healthy watcher writes a line every 700ms. But
+# the failure this exists for is precisely the one you cannot afford to be
+# silent about: a watcher that cannot reach herdr looks identical to a pane with
+# no plugin installed. Nobody will ever turn on FREEBUFF_DEBUG to diagnose a
+# symptom that produces no output.
+log_always() {
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$*" >> "$DEBUG_LOG" 2>/dev/null
+  printf 'freebuff-watcher: %s\n' "$*" >&2
+  return 0
+}
+
 # Monotonic seq counter, single writer per pane. Herdr drops reports whose seq
 # is not greater than the last accepted one for the same source.
 next_seq() {
@@ -61,10 +74,33 @@ next_seq() {
   printf '%s' "$seq"
 }
 
+# Consecutive report-agent failures tolerated before the watcher gives up.
+#
+# Giving up is correct, not defensive: once the server is gone this process is
+# holding a pane's worth of dead state and a stale seq counter, and the only
+# thing that can fix it is exiting so the startup hook re-attaches a fresh
+# watcher against the new server.
+REPORT_FAILURE_LIMIT="${FREEBUFF_REPORT_FAILURE_LIMIT:-5}"
+REPORT_FAILURES=0
+
 report() {
   log "report $1"
-  "$(herdr_cmd)" pane report-agent "$PANE_ID" \
-    --source "$SOURCE" --agent "$AGENT" --state "$1" --seq "$(next_seq)" >/dev/null 2>&1
+  if "$(herdr_cmd)" pane report-agent "$PANE_ID" \
+    --source "$SOURCE" --agent "$AGENT" --state "$1" --seq "$(next_seq)" >/dev/null 2>&1; then
+    if [ "$REPORT_FAILURES" -gt 0 ]; then
+      log_always "report-agent recovered after $REPORT_FAILURES failure(s)"
+      REPORT_FAILURES=0
+    fi
+    return 0
+  fi
+
+  REPORT_FAILURES=$(( REPORT_FAILURES + 1 ))
+  log_always "report-agent FAILED state=$1 ($REPORT_FAILURES/$REPORT_FAILURE_LIMIT consecutive)"
+  if [ "$REPORT_FAILURES" -ge "$REPORT_FAILURE_LIMIT" ]; then
+    log_always "giving up on pane $PANE_ID: $REPORT_FAILURE_LIMIT consecutive report-agent failures. Watcher will exit so the startup hook re-attaches it against the new server."
+    exit 1
+  fi
+  return 0
 }
 
 # Display-only presentation. Never carries lifecycle authority.
@@ -125,6 +161,13 @@ label
 PREV_STATE=""
 IDLE_STREAK=0
 
+# Re-report the current state even when it has not changed, so a watcher whose
+# reports are failing gets to discover that. Without this the failure counter
+# below only advances on a state change, and a pane sitting idle against a dead
+# server would never attempt a report and never notice.
+HEARTBEAT_POLLS="${FREEBUFF_HEARTBEAT_POLLS:-30}"
+POLLS_SINCE_REPORT=0
+
 while kill -0 "$FREEBUFF_PID" 2>/dev/null; do
   if [ -z "$CHAT_DIR" ]; then
     candidate=$(pin_own_chat_dir "$PANE_ID" "$PROJECT_SLUG" "$MIN_CREATED_MS")
@@ -156,6 +199,15 @@ while kill -0 "$FREEBUFF_PID" 2>/dev/null; do
   if [ "$(should_report_state "$PREV_STATE" "$state" "$IDLE_STREAK")" = "1" ]; then
     report "$state"
     PREV_STATE="$state"
+    POLLS_SINCE_REPORT=0
+  else
+    POLLS_SINCE_REPORT=$(( POLLS_SINCE_REPORT + 1 ))
+    # Only once something has actually been reported, so a pane that has never
+    # left its debounce window does not heartbeat an empty state.
+    if [ -n "$PREV_STATE" ] && [ "$POLLS_SINCE_REPORT" -ge "$HEARTBEAT_POLLS" ]; then
+      report "$PREV_STATE"
+      POLLS_SINCE_REPORT=0
+    fi
   fi
 
   sleep "$POLL_INTERVAL"
