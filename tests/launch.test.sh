@@ -135,6 +135,54 @@ t_title "launch.sh: unknown mode fails"
 output=$(HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" unknown 2>&1 || true)
 echo "$output" | grep -q "unknown launch mode" && t_pass "unknown mode rejected" || t_fail "unknown mode should be rejected"
 
+# --- a pane's PATH is not a login shell's PATH ---
+
+# Herdr panes are spawned by the herdr *server*. That server is normally started
+# by launchd from herdr-gui's LaunchAgent and inherits launchd's default PATH,
+# which on a version-managed node install contains neither freebuff nor node nor
+# herdr. Verified on this machine under the exact PATH below: `command -v` finds
+# none of the three.
+#
+# So the launcher has to repair PATH itself, or a plugin pane opened from a GUI
+# launch simply fails.
+BARE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+BARE_HOME=$(mktemp -d)
+mkdir -p "$BARE_HOME/.local/bin"
+# A fake version-managed install, laid out where augment_path looks.
+mkdir -p "$BARE_HOME/.local/share/fnm/node-versions/v24.21.0/installation/bin"
+ln -sf "$PROJECT_ROOT/tests/fixtures/herdr-stub.sh" "$BARE_HOME/.local/bin/herdr"
+ln -sf "$PROJECT_ROOT/tests/fixtures/bin/freebuff" \
+  "$BARE_HOME/.local/share/fnm/node-versions/v24.21.0/installation/bin/freebuff"
+
+t_title "launch.sh: finds freebuff under a bare launchd PATH"
+# The regression: with only the bare PATH, this aborts with
+# "freebuff binary not found on PATH".
+bare_out=$(env -i PATH="$BARE_PATH" HOME="$BARE_HOME" HERDR_PANE_ID= HERDR_ENV= \
+  sh "$PROJECT_ROOT/scripts/launch.sh" task 2>&1 &
+  sleep 1; kill %1 2>/dev/null; wait 2>/dev/null)
+if printf '%s' "$bare_out" | grep -q "freebuff binary not found"; then
+  t_fail "bare PATH: launcher cannot find freebuff"
+else
+  t_pass "bare PATH: freebuff resolved from the fnm install prefix"
+fi
+
+t_title "launch.sh: bare PATH failure names node, which reporting also needs"
+# Without node the watcher cannot build a seq and the classifier cannot parse, so
+# a pane that opened but never reported would look like an unrelated bug.
+NO_NODE_OUT=$(env -i PATH="$BARE_PATH" HOME="$BARE_HOME/nodeonly" HERDR_PANE_ID= HERDR_ENV= \
+  sh "$PROJECT_ROOT/scripts/launch.sh" task 2>&1 || true)
+if printf '%s' "$NO_NODE_OUT" | grep -q "freebuff binary not found"; then
+  if printf '%s' "$NO_NODE_OUT" | grep -q "node is also not on PATH"; then
+    t_pass "the error explains that node is missing too"
+  else
+    t_fail "the error should mention node, since reporting needs it as well"
+  fi
+else
+  t_fail "setup: expected a freebuff-not-found error with no freebuff installed"
+fi
+
+rm -rf "$BARE_HOME"
+
 # Restore
 pkill -f "fake freebuff" 2>/dev/null || true
 rm -rf "$FAKEHOME" /tmp/herdr-launch-test-last.txt /tmp/herdr-launch-test-call.txt

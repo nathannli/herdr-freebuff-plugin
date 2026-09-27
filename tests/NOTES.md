@@ -202,6 +202,36 @@ long-lived by design, and a test that starts one has to tear it down by pid,
 which is the same fragile pattern the suite avoids elsewhere. Its single-instance
 claim and kill switch were verified by hand against a live server.
 
+## A pane's PATH is not a shell's PATH
+Herdr panes are spawned by the herdr *server*, not by your shell, and that server
+is normally started by launchd from herdr-gui's LaunchAgent. Its PATH is
+launchd's default, `/usr/bin:/bin:/usr/sbin:/sbin`, which on a version-managed
+node install resolves none of `freebuff`, `node`, or `herdr`. Verified on this
+machine with `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin`.
+
+All three matter, which is why the repair is one shared call in `common.sh` rather
+than a `freebuff` lookup in `launch.sh`: without `node` the watcher's `next_seq`
+and the classifier both fail, so a pane would open and then never report — a
+different-looking bug entirely. The launch test asserts the launcher finds
+freebuff under that exact PATH, and that the failure message names `node` when
+it is also missing.
+
+`augment_path` appends. The first version prepended, and
+`tests/common.test.sh` caught it: prepending lets a fallback directory outrank a
+binary the user had already resolved, so a pane would silently run a different
+version than their shell would have. The test asserts PATH order is preserved and
+fallbacks land after it.
+
+Two fixture traps worth remembering. A `: > node` placeholder is not enough:
+`command -v` skips a non-executable file, so the test fails for a reason that has
+nothing to do with PATH. And an unexpanded glob must never reach PATH, so the
+"no version managers installed" case asserts no literal `*` appears.
+
+Ordering inside `common.sh` is load-bearing and was wrong once: the `augment_path`
+call sat *above* its definition, so sourcing the file printed
+`augment_path: command not found` and silently did nothing. Shell resolves at call
+time, so the call has to come after.
+
 ## Detaching background processes from a tool call
 Not a property of the plugin, but it cost real time to learn and will cost it
 again. A long-lived process started from a tool call is reaped when that call's
