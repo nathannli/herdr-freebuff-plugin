@@ -275,10 +275,12 @@ All were confirmed against a live herdr 0.9.1 server, not inferred.
   fallback, because "newest" cannot identify a resumed session and a wrong pin
   is worse than none. The pane reports `idle` until freebuff writes a log line
   carrying its pid, which is immediate in practice but is a real window.
-- **No native session identity is reported**, so herdr cannot auto-resume a
-  freebuff pane after a server restart, and `resume_agents_on_restore` has
-  nothing to resume from: freebuff 0.1.2 has no `--agent-session-id`, and the
-  only session-shaped id on disk is the `cli:<uuid>` `instanceId` in
+- **No native session identity is reported, deliberately.** Herdr 0.9.1 does
+  support this: its report call takes `--agent-session-id ID` and
+  `--agent-session-path PATH`, and `resume_agents_on_restore` is a config key.
+  The plugin reports neither, because freebuff exposes nothing that can be
+  resumed unambiguously. Freebuff 0.1.2 has no `--agent-session-id` of its own,
+  and the only session-shaped id on disk is the `cli:<uuid>` `instanceId` in
   `~/.config/manicode/freebuff-live-<pid>.json`, which `--continue` never reads.
   `--continue <id>` uses the value verbatim as a directory name under
   `~/.config/manicode/projects/<basename(cwd)>/chats/`, so the id is a chat
