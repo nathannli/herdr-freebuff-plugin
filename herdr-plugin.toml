@@ -5,6 +5,13 @@ min_herdr_version = "0.7.0"
 description = "Launch and manage Freebuff agents inside Herdr, with session restore and lifecycle state."
 platforms = ["linux", "macos", "windows"]
 
+# Runs at server start and after a restore: sweeps state for panes that are
+# gone, re-attaches watchers to surviving freebuff panes, adopts panes running a
+# freebuff the user started by hand, and starts the periodic sweep daemon that
+# keeps doing all three (herdr 0.9.1 has no way to hook pane creation).
+[[startup]]
+command = ["sh", "scripts/prune-state.sh"]
+
 # Interactive Freebuff sessions run as plugin PANE entrypoints. Herdr opens a
 # real terminal PTY for each, so freebuff's TUI gets a TTY (actions/CLI have
 # none and cannot launch interactive agents). Bind these in your herdr config:
@@ -25,18 +32,6 @@ id = "resume-last"
 title = "Freebuff (last session)"
 placement = "split"
 command = ["sh", "scripts/launch.sh", "resume-last"]
-
-[[panes]]
-id = "resume-named"
-title = "Freebuff (named session)"
-placement = "split"
-command = ["sh", "scripts/launch.sh", "resume-named"]
-
-[[actions]]
-id = "setup"
-title = "Freebuff: install herdr integration"
-contexts = ["workspace"]
-command = ["sh", "scripts/setup.sh"]
 
 [[actions]]
 id = "notify"

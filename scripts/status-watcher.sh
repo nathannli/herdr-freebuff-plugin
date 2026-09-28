@@ -1,63 +1,274 @@
 #!/bin/sh
 # Freebuff -> Herdr lifecycle status watcher.
 #
-# Spawned as a detached child of scripts/launch.sh. Scans freebuff's per-chat
-# state files across ALL manicode projects (~/.config/manicode/projects/*/chats/)
-# to classify the agent state and reports to the herdr pane socket.
+# One instance per herdr pane running freebuff. Started by scripts/launch.sh for
+# plugin-opened panes, and by scripts/attach-watches.sh for panes that survived
+# a herdr restart. Scans freebuff's per-chat state files to classify the agent
+# state and reports to the herdr pane.
 #
-# Arguments: <launcher_pid> <pane_id>
+# Arguments: <freebuff_pid> <pane_id> [min_created_ms]
+#
+# Reports use a stable namespaced source so herdr can order them by --seq and
+# release the source's lifecycle authority on exit. Without that release, the
+# pane keeps the last reported state (working/blocked) forever once freebuff
+# is gone.
 
+. "$(dirname "$0")/common.sh"
 . "$(dirname "$0")/watcher-lib.sh"
 
+FREEBUFF_PID="$1"
 PANE_ID="$2"
-LAUNCHER_PID="$1"
+MIN_CREATED_MS="${3:-0}"
 
-[ "${HERDR_ENV:-}" = "1" ] && [ -n "$PANE_ID" ] || exit 0
+# Stable and unique per integration, as herdr requires. Never change these
+# without unlinking the plugin: a new source is a new authority owner.
+SOURCE="custom:freebuff"
+AGENT="freebuff"
+META_SOURCE="custom:freebuff-display"
 
-# Monotonic seq counter (mirrors opencode's reportSeq pattern)
-SEQ_FILE="${TMPDIR:-/tmp}/herdr-freebuff-seq-${PANE_ID}"
+[ -n "$FREEBUFF_PID" ] && [ -n "$PANE_ID" ] && can_report || exit 0
+
+STATE_DIR="${HERDR_PLUGIN_STATE_DIR}"
+if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+  STATE_DIR="${TMPDIR:-/tmp}/herdr-freebuff"
+  mkdir -p "$STATE_DIR" 2>/dev/null || STATE_DIR="${TMPDIR:-/tmp}"
+fi
+SEQ_FILE="${STATE_DIR}/seq-${PANE_ID}"
+PID_FILE="${STATE_DIR}/watch-${PANE_ID}.pid"
+DEBUG_LOG="${STATE_DIR}/watcher-${PANE_ID}.log"
+
+# Claim this pane before doing anything else.
+#
+# Several sweeps can run at once and each spawns a candidate watcher, so this is
+# where a pane's single watcher is decided. The claim is an exclusive create, so
+# the kernel picks one winner: a losing watcher exits here having reported
+# nothing, written no seq counter, and touched no herdr state. It has to be the
+# watcher that claims rather than the sweep that spawns it, because the claim has
+# to be a single step performed by the process that will occupy the slot.
+claim_watch_slot "$PANE_ID" || exit 0
+
+# Let a restart sweep tell a live watcher from a dead one.
+#
+# Written atomically: a sweep reading this file mid-update must never see it
+# empty, because an empty slot is refused as a writer mid-update and would need
+# another sweep to fix.
+record_watch_slot "$PANE_ID" "$$"
+
+# Opt-in diagnostics: FREEBUFF_DEBUG=1 in the pane environment.
+log() {
+  if [ -n "${FREEBUFF_DEBUG:-}" ]; then
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$*" >> "$DEBUG_LOG" 2>/dev/null
+  fi
+  return 0
+}
+
+# Unconditional logging, for the case where the watcher has lost herdr.
+#
+# `log` is debug-gated because a healthy watcher writes a line every 700ms. But
+# the failure this exists for is precisely the one you cannot afford to be
+# silent about: a watcher that cannot reach herdr looks identical to a pane with
+# no plugin installed. Nobody will ever turn on FREEBUFF_DEBUG to diagnose a
+# symptom that produces no output.
+log_always() {
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$*" >> "$DEBUG_LOG" 2>/dev/null
+  printf 'freebuff-watcher: %s\n' "$*" >&2
+  return 0
+}
+
+# Monotonic seq counter, single writer per pane. Herdr drops reports whose seq
+# is not greater than the last accepted one for the same source.
 next_seq() {
   if [ -f "$SEQ_FILE" ]; then
-    seq=$(cat "$SEQ_FILE" 2>/dev/null | tr -dc '0-9')
+    seq=$(tr -dc '0-9' < "$SEQ_FILE" 2>/dev/null)
   else
     seq=$(node -e 'process.stdout.write(String(Date.now()*1000))')
   fi
   seq=$(( ${seq:-0} + 1 ))
-  printf '%s' "$seq" > "$SEQ_FILE"
+  printf '%s' "$seq" > "$SEQ_FILE" 2>/dev/null
   printf '%s' "$seq"
 }
 
+# Consecutive report-agent failures tolerated before the watcher gives up.
+#
+# Giving up is correct, not defensive: once the server is gone this process is
+# holding a pane's worth of dead state and a stale seq counter, and the only
+# thing that can fix it is exiting so the startup hook re-attaches a fresh
+# watcher against the new server.
+REPORT_FAILURE_LIMIT="${FREEBUFF_REPORT_FAILURE_LIMIT:-5}"
+REPORT_FAILURES=0
+
 report() {
-  "$(herdr_cmd)" pane report-agent "$PANE_ID" \
-    --source freebuff --agent freebuff --state "$1" --seq "$(next_seq)" >/dev/null 2>&1
+  log "report $1"
+  if "$(herdr_cmd)" pane report-agent "$PANE_ID" \
+    --source "$SOURCE" --agent "$AGENT" --state "$1" --seq "$(next_seq)" >/dev/null 2>&1; then
+    if [ "$REPORT_FAILURES" -gt 0 ]; then
+      log_always "report-agent recovered after $REPORT_FAILURES failure(s)"
+      REPORT_FAILURES=0
+    fi
+    return 0
+  fi
+
+  REPORT_FAILURES=$(( REPORT_FAILURES + 1 ))
+  log_always "report-agent FAILED state=$1 ($REPORT_FAILURES/$REPORT_FAILURE_LIMIT consecutive)"
+  if [ "$REPORT_FAILURES" -ge "$REPORT_FAILURE_LIMIT" ]; then
+    log_always "giving up on pane $PANE_ID: $REPORT_FAILURE_LIMIT consecutive report-agent failures. Watcher will exit so the startup hook re-attaches it against the new server."
+    exit 1
+  fi
+  return 0
 }
 
+# Display-only presentation. Never carries lifecycle authority.
 label() {
   "$(herdr_cmd)" pane report-metadata "$PANE_ID" \
-    --source freebuff --agent freebuff --display-agent freebuff >/dev/null 2>&1
+    --source "$META_SOURCE" --agent "$AGENT" --display-agent freebuff >/dev/null 2>&1
 }
+
+# Release authority and drop per-pane state so the pane cannot keep a stale
+# working/blocked dot after freebuff exits.
+#
+# Order matters twice over:
+#   1. next_seq must be read BEFORE the rm, because next_seq writes the seq file
+#      and would otherwise recreate the file we just deleted.
+#   2. The rm runs before the herdr call, so the local cleanup cannot be lost to
+#      a race with a signal arriving mid-call.
+#
+# This still does not run when a pane is closed: herdr tears the pane's process
+# group down with SIGKILL, which no shell trap can intercept. prune_orphan_state
+# covers that case.
+cleanup() {
+  seq=$(next_seq)
+  rm -f "$SEQ_FILE" "$PID_FILE" 2>/dev/null
+  log "releasing $SOURCE for $PANE_ID"
+  "$(herdr_cmd)" pane release-agent "$PANE_ID" \
+    --source "$SOURCE" --agent "$AGENT" --seq "$seq" >/dev/null 2>&1
+}
+trap cleanup EXIT
+# SIGHUP matters most here: closing the pane tears down the PTY and hangs up the
+# watcher. Without a HUP handler the shell dies without running the EXIT trap.
+trap 'exit 0' HUP INT TERM
+
+# Fractional sleep is not POSIX. Probe once so a strict sleep(1) cannot turn
+# the poll loop into a busy spin.
+POLL_INTERVAL=0.7
+if ! sleep "$POLL_INTERVAL" 2>/dev/null; then
+  log "fractional sleep unsupported, falling back to 1s"
+  POLL_INTERVAL=1
+fi
+
+log "watcher start pane=$PANE_ID freebuff_pid=$FREEBUFF_PID interval=$POLL_INTERVAL"
+
+# Pin this pane to exactly one chat dir, and keep checking that it still holds.
+#
+# The pin is by writer pid, not by "newest dir". Newest-by-mtime is not a stable
+# identity: an idle session stops touching its dir, so any other freebuff
+# session still writing becomes newest and hijacks this pane's state. Measured
+# on a live server, an idle pane flipped to working and stayed there for 76
+# polls because an unrelated session was mid-turn.
+#
+# The pin is also not trusted forever: see PIN_RECHECK_POLLS below.
+PROJECT_SLUG=$(pane_project_slug "$PANE_ID")
+log "project_slug=${PROJECT_SLUG:-<unresolved>} min_created_ms=$MIN_CREATED_MS"
+
+CHAT_DIR=""
+# Consecutive polls that found the pinned dir was no longer being written by
+# this pane, before the pin is dropped and re-resolved.
+#
+# Debounced because a mismatch is not proof on its own: freebuff forks, the
+# pane's foreground process group changes, and `pane process-info` can report a
+# transient set of pids. A single bad poll must not cost a working session its
+# pin, and a genuine hijack is corrected within a couple of seconds anyway.
+PIN_LOSS_POLLS="${FREEBUFF_PIN_LOSS_POLLS:-3}"
+PIN_LOSS_STREAK=0
+
+# How often to re-check a pin that is already established.
+#
+# Re-checking costs one `pane process-info` call, so it runs on a slow cadence
+# rather than every poll. The check exists because a pin is a snapshot: freebuff
+# can be restarted inside the pane, or the pin can be wrong from the moment it is
+# taken, and without a re-check that wrongness is permanent.
+PIN_RECHECK_POLLS="${FREEBUFF_PIN_RECHECK_POLLS:-10}"
+POLLS_SINCE_PIN_CHECK=0
 
 # --- Main loop ---
 label
 
 PREV_STATE=""
+IDLE_STREAK=0
 
-while kill -0 "$LAUNCHER_PID" 2>/dev/null; do
-  chat_dir=$(find_newest_chat)
+# Re-report the current state even when it has not changed, so a watcher whose
+# reports are failing gets to discover that. Without this the failure counter
+# below only advances on a state change, and a pane sitting idle against a dead
+# server would never attempt a report and never notice.
+HEARTBEAT_POLLS="${FREEBUFF_HEARTBEAT_POLLS:-30}"
+POLLS_SINCE_REPORT=0
 
-  if [ -z "$chat_dir" ]; then
-    [ "$PREV_STATE" != "idle" ] && report idle
-    PREV_STATE="idle"
-    sleep 0.7
+while kill -0 "$FREEBUFF_PID" 2>/dev/null; do
+  if [ -z "$CHAT_DIR" ]; then
+    candidate=$(pin_own_chat_dir "$PANE_ID" "$PROJECT_SLUG" "$MIN_CREATED_MS")
+    if [ -n "$candidate" ]; then
+      CHAT_DIR="$candidate"
+      PIN_LOSS_STREAK=0
+      log "pinned chat_dir=$CHAT_DIR (watching pid $FREEBUFF_PID)"
+    fi
+  elif [ ! -d "$CHAT_DIR" ]; then
+    log "pinned chat dir disappeared, re-pinning"
+    CHAT_DIR=""
+    PIN_LOSS_STREAK=0
+    sleep "$POLL_INTERVAL"
     continue
+  else
+    POLLS_SINCE_PIN_CHECK=$(( POLLS_SINCE_PIN_CHECK + 1 ))
+    if [ "$POLLS_SINCE_PIN_CHECK" -ge "$PIN_RECHECK_POLLS" ]; then
+      POLLS_SINCE_PIN_CHECK=0
+      verdict=$(chat_dir_still_ours "$PANE_ID" "$CHAT_DIR")
+      case "$verdict" in
+        no)
+          PIN_LOSS_STREAK=$(( PIN_LOSS_STREAK + 1 ))
+          log "pinned chat_dir no longer written by this pane ($PIN_LOSS_STREAK/$PIN_LOSS_POLLS): $CHAT_DIR"
+          if [ "$PIN_LOSS_STREAK" -ge "$PIN_LOSS_POLLS" ]; then
+            log "dropping stale pin, re-resolving"
+            CHAT_DIR=""
+            PIN_LOSS_STREAK=0
+          fi
+          ;;
+        *)
+          # yes, or unknown: nothing to act on. unknown means herdr could not
+          # tell us, which is not evidence the pin went bad.
+          PIN_LOSS_STREAK=0
+          ;;
+      esac
+    fi
   fi
 
-  state=$(classify "$chat_dir" "$PANE_ID")
+  if [ -z "$CHAT_DIR" ]; then
+    # This pane's freebuff has not written a chat dir yet.
+    state=idle
+  else
+    state=$(classify "$CHAT_DIR" "$PANE_ID")
+  fi
+  log "state=$state chat_dir=${CHAT_DIR:-<unpinned>}"
 
-  [ "$state" != "$PREV_STATE" ] && {
+  if [ "$state" = idle ]; then
+    IDLE_STREAK=$((IDLE_STREAK + 1))
+  else
+    IDLE_STREAK=0
+  fi
+
+  if [ "$(should_report_state "$PREV_STATE" "$state" "$IDLE_STREAK")" = "1" ]; then
     report "$state"
     PREV_STATE="$state"
-  }
+    POLLS_SINCE_REPORT=0
+  else
+    POLLS_SINCE_REPORT=$(( POLLS_SINCE_REPORT + 1 ))
+    # Only once something has actually been reported, so a pane that has never
+    # left its debounce window does not heartbeat an empty state.
+    if [ -n "$PREV_STATE" ] && [ "$POLLS_SINCE_REPORT" -ge "$HEARTBEAT_POLLS" ]; then
+      report "$PREV_STATE"
+      POLLS_SINCE_REPORT=0
+    fi
+  fi
 
-  sleep 0.7
+  sleep "$POLL_INTERVAL"
 done
+
+log "freebuff pid $FREEBUFF_PID gone, watcher exiting"

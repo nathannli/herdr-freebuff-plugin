@@ -11,4 +11,4 @@ if ! in_herdr; then
   exit 1
 fi
 
-"$HERDR" notification show "$title" --body "$body" --sound request
+"$(herdr_cmd)" notification show "$title" --body "$body" --sound request
