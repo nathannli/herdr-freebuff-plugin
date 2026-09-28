@@ -21,3 +21,6 @@ HERDR_CALL_LOG*
 
 # CommandCode AI habit files (per-user, not project-level)
 .commandcode/
+
+# graphify knowledge-graph output (local analysis cache)
+graphify-out/
