@@ -2,7 +2,34 @@ id = "freebuff.integration"
 name = "Freebuff"
 version = "0.2.0"
 min_herdr_version = "0.9.1"
-description = "Launch and manage Freebuff agents inside Herdr, with session restore, adoption of manually started sessions, and lifecycle state."
+# "session restore" is struck through in the description below because it is not
+# implemented, and currently cannot be. It is left visible rather than deleted so
+# the gap is not mistaken for an oversight.
+#
+# Herdr 0.9.1 does support this: its report call takes `--agent-session-id ID`
+# and `--agent-session-path PATH`, and `resume_agents_on_restore` is a config
+# key. So herdr would restore a plugin agent that reported a session id. The
+# plugin never reports one, because freebuff exposes nothing that can be
+# resumed unambiguously:
+#
+#   * freebuff 0.1.2 has no `--agent-session-id` of its own, and the only
+#     session-shaped id on disk is the `cli:<uuid>` instanceId in
+#     ~/.config/manicode/freebuff-live-<pid>.json.
+#   * `freebuff --continue` does not read that instanceId. It uses the value
+#     verbatim as a directory name under
+#     ~/.config/manicode/projects/<basename(cwd)>/chats/ — the chat directory
+#     name is the conversation id — and on a miss it logs at debug level and
+#     silently resumes the most recent chat in that project instead.
+#
+# Reporting an id that freebuff would mis-resolve is worse than reporting none:
+# a restore would silently reopen the wrong conversation. The safe value does
+# not exist yet, so nothing is reported.
+#
+# Note that pane *lifecycle state* does survive a restart, via the [[startup]]
+# hook below, which re-attaches watchers to surviving panes. What does not
+# happen is freebuff being relaunched into the same conversation. `resume-last`
+# is a manual resume the user triggers, and is the whole of it.
+description = "Launch and manage Freebuff agents inside Herdr, with ~~session restore~~ (not implemented: freebuff exposes no resumable session id — see note above), adoption of manually started sessions, and lifecycle state."
 # The scripts are POSIX sh and require node. No Windows support.
 platforms = ["linux", "macos"]
 
