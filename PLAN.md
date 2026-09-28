@@ -132,13 +132,15 @@ the design:
    mtime that proves a chat dir is its own, and newest-by-mtime cannot identify a
    resumed session. It waits for a writer-pid match and reports `idle` until one
    appears.
-3. **Adoption is once, visible, and reversible.** The `adopted-` marker is written
-   *before* the watcher is spawned, so a sweep that dies between the two does not
-   cause a second adoption. `no-adopt` stops new claims, `no-adopt-<pane_id>`
-   detaches one pane, `FREEBUFF_NO_ADOPT=1` does the first from the environment.
-   Turning adoption off does not kill existing watchers: a watcher stopped without
-   releasing its herdr authority leaves a stale dot, which is worse than a live
-   watcher on an unwanted pane.
+3. **A claim lasts as long as the freebuff it was made for.** The `adopted-`
+   marker is written *before* the watcher is spawned, so a sweep that dies
+   between the two does not cause a second adoption, and it is dropped again once
+   the pane has no freebuff in it, so a freebuff started there later is adopted
+   normally. `no-adopt` stops new claims, `no-adopt-<pane_id>` detaches one pane,
+   `FREEBUFF_NO_ADOPT=1` does the first from the environment. Turning adoption off
+   does not kill existing watchers: a watcher stopped without releasing its herdr
+   authority leaves a stale dot, which is worse than a live watcher on an unwanted
+   pane.
 
 Adoption and attachment are separate steps on purpose. Adoption is a one-way
 decision to write state into a pane the user owns; attachment is idempotent
@@ -208,7 +210,7 @@ file-based state is stale during exactly the windows that matter.
 | `tests/notify.test.sh` | 2 (sends notification, fails outside herdr) |
 | `tests/prune.test.sh` | 6 (orphan sweep, pane-id prefix safety, log pruning) |
 | `tests/attach.test.sh` | 21 (debounce gate, pid pinning, floor-gated fallback, pin re-validation, `pane_freebuff_pid` lookalikes, sweep scope, concurrent-sweep race, claim primitive) |
-| `tests/adopt.test.sh` | 15 (path resolution, lookalike and own-script rejection, adoption + marker, no re-adoption, `owned-` panes untouched, `no-adopt` / `FREEBUFF_NO_ADOPT` / per-pane opt-out, adopted-marker sweep, re-attach after SIGKILL, opt-out detach) |
+| `tests/adopt.test.sh` | 16 (path resolution, lookalike and own-script rejection, adoption + marker, no re-adoption, `owned-` panes untouched, `no-adopt` / `FREEBUFF_NO_ADOPT` / per-pane opt-out, adopted-marker sweep, stale claim does not block re-adoption, re-attach after SIGKILL, opt-out detach) |
 | `tests/watcher.test.sh` | 43 (classify matrix, `detect_screen_state`, `classify_signals`, `find_newest_chat`, `pane_project_slug`) |
 
 Each e2e phase resets the herdr-stub call log before asserting, so a state

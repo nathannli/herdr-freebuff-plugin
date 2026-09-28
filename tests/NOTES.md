@@ -191,6 +191,31 @@ An adopted pane has no launch floor, so it is spawned with floor `0` and waits
 for a writer-pid match before pinning. It reports `idle` until then, which
 self-heals the moment freebuff writes its first log line.
 
+## A claim is on a freebuff, not on a pane
+`adopt-watches.sh` originally skipped any pane carrying an `adopted-` marker,
+which reads as sensible idempotence and is not. `prune_orphan_state` only clears
+state for panes herdr no longer lists, so a *live* pane whose freebuff had exited
+kept its marker forever, every later sweep skipped the pane, and a freebuff
+started there again was never adopted — permanently `agent_status: unknown`.
+Found live on `w1Z:p1` after a server restart, with a dead watcher pidfile
+alongside the stale marker.
+
+Two details the fix depends on, both of which the regression test pins:
+
+- The freebuff lookup has to run *before* the watcher-pidfile pre-check. The
+  marker is a claim on a process, so answering "is the claim still valid" cannot
+  depend on whether a watcher happens to be alive, or a stale claim outlives the
+  thing it names whenever the old watcher is still running.
+- The marker has to be (re)written *before* that same pre-check continues. If a
+  live watcher causes an early `continue` before the marker is written, an
+  adopted pane ends up with no marker at all, and a missing marker is exactly
+  what `attach-watches.sh` reads to decide a pane is still claimed.
+
+The test adopts a pane, swaps the stubbed pane process for a plain shell, runs a
+sweep, asserts the marker is gone, `kill -9`s the watcher the way a restart does,
+puts a freebuff back, and asserts a live watcher. Reverting the script makes both
+assertions fail.
+
 ## The sweep daemon
 `tests/run.sh` exports `FREEBUFF_NO_DAEMON=1`. A daemon started by a suite would
 outlive the run, inherit the stub environment, and keep sweeping a stale pane
