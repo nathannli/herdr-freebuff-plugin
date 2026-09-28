@@ -321,6 +321,37 @@ running attach → adopt every 20s. Exactly one daemon runs: it claims
 makes every other starter back off. A dead holder's claim is reclaimed, so a
 daemon killed with its server comes back on the next startup hook.
 
+#### Registration delay is expected
+
+A freebuff does not appear in herdr the instant it starts. The delay depends on
+how the session was launched, and both paths are bounded and short.
+
+| how the session started | what registers it | expected delay |
+|---|---|---|
+| a plugin pane (`prefix+f`) | `launch.sh` spawns the watcher itself | ~1s, plus freebuff's own startup (usually ~10s total to the first state) |
+| typed into a pane by hand | the next sweep daemon pass | up to `FREEBUFF_SWEEP_INTERVAL` (20s), average ~12s |
+
+After the watcher exists, the first report lands on its next poll, every 700ms.
+Reporting `idle` is debounced by three consecutive polls (~2.1s) so a
+`working → idle` flicker does not show up in the UI, which is the floor on any
+`idle` report.
+
+So a manually started freebuff can sit at `unknown` for up to ~22s, and that is
+correct behaviour, not a missed sweep. If it is still `unknown` after a couple of
+passes, adoption is the thing to check, not the poll interval.
+
+To trade herdr calls for a snappier worst case, set `FREEBUFF_SWEEP_INTERVAL=5`
+for ~7s. The cost is one `pane list` plus one `pane process-info` per candidate
+pane on every pass. The variable has to be in **herdr's** environment rather than
+your shell's, because the daemon inherits the environment herdr started it with
+— put it in `~/.config/herdr-gui/herdr-gui.env` if herdr-gui launches the
+server, or set it before starting the server yourself.
+
+Two nearby knobs that are not the same thing: `FREEBUFF_HEARTBEAT_POLLS` (30,
+~21s) re-reports the current state so herdr's does not go stale, and is a
+keepalive rather than a registration delay; and the idle debounce above is a
+floor on reporting, not on discovery.
+
 ### State detection matrix
 
 Screen signals come from `herdr pane read <pane> --source detection` — herdr's
