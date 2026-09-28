@@ -18,6 +18,40 @@ export HERDR_CALL_LOG="/tmp/herdr-launch-test-call.txt"
 
 # Isolated plugin state dir so watcher seq files never touch the real one
 export HERDR_PLUGIN_STATE_DIR="$FAKEHOME/state"
+
+# Only ever match this suite's own watchers.
+#
+# These tests used `pkill -f "status-watcher.sh"` and counted matches from
+# `ps -ef | grep status-watcher.sh`. Both are unscoped, and a live plugin's
+# watcher runs out of the *installed* plugin directory, so it matches too. That
+# cut two ways: every suite run killed the watcher for the real freebuff session
+# on this machine (the sweep daemon re-attached a new one within 20s, which is
+# why it went unnoticed), and the daemon's re-attached watcher was counted here
+# as a leak — which is the flaky failure "watcher should not spawn outside herdr
+# (count: 1)", appearing only when a re-attach landed inside the 0.8s window.
+#
+# Test watchers are spawned as `sh $PROJECT_ROOT/scripts/status-watcher.sh`, so
+# scoping on this repo's path separates ours from the live ones exactly, while
+# still cleaning up after any suite in this repo.
+test_watcher_pids() {
+  pgrep -f "$PROJECT_ROOT/scripts/status-watcher.sh" 2>/dev/null
+}
+
+kill_test_watchers() {
+  for _p in $(test_watcher_pids); do
+    kill "$_p" 2>/dev/null
+  done
+  return 0
+}
+
+count_test_watchers() {
+  _p=$(test_watcher_pids)
+  if [ -n "$_p" ]; then
+    printf '%s\n' "$_p" | grep -c .
+  else
+    printf '0'
+  fi
+}
 mkdir -p "$HERDR_PLUGIN_STATE_DIR"
 
 t_title "launch.sh: task mode execs freebuff"
@@ -66,7 +100,7 @@ pkill -f "fake freebuff" 2>/dev/null || true
 sleep 0.3
 
 t_title "launch.sh: spawns the status watcher inside a herdr pane"
-pkill -f "status-watcher.sh" 2>/dev/null || true
+kill_test_watchers
 sleep 0.3
 (
   exec 2>/dev/null
@@ -75,18 +109,18 @@ sleep 0.3
 ) &
 pid=$!
 sleep 0.8
-watcher_count=$(ps -ef | grep "status-watcher.sh" | grep -v grep | wc -l | tr -d ' ')
+watcher_count=$(count_test_watchers)
 if [ "$watcher_count" -ge 1 ]; then
   t_pass "watcher spawned inside herdr (count: $watcher_count)"
 else
   t_fail "watcher should spawn inside herdr (count: $watcher_count)"
 fi
 kill $pid 2>/dev/null
-pkill -f "status-watcher.sh" 2>/dev/null || true
+kill_test_watchers
 sleep 0.2
 
 t_title "launch.sh: no watcher outside a herdr pane"
-pkill -f "status-watcher.sh" 2>/dev/null || true
+kill_test_watchers
 sleep 0.3
 (
   exec 2>/dev/null
@@ -95,14 +129,14 @@ sleep 0.3
 ) &
 pid=$!
 sleep 0.8
-watcher_count=$(ps -ef | grep "status-watcher.sh" | grep -v grep | wc -l | tr -d ' ')
+watcher_count=$(count_test_watchers)
 if [ "$watcher_count" -eq 0 ]; then
   t_pass "no watcher spawned outside herdr"
 else
   t_fail "watcher should not spawn outside herdr (count: $watcher_count)"
 fi
 kill $pid 2>/dev/null
-pkill -f "status-watcher.sh" 2>/dev/null || true
+kill_test_watchers
 
 t_title "launch.sh: no watcher when the herdr socket is absent"
 # HERDR_ENV=1 with a pane id but no socket: herdr cannot receive reports, so
@@ -114,14 +148,51 @@ t_title "launch.sh: no watcher when the herdr socket is absent"
 ) &
 pid=$!
 sleep 0.8
-watcher_count=$(ps -ef | grep "status-watcher.sh" | grep -v grep | wc -l | tr -d ' ')
+watcher_count=$(count_test_watchers)
 if [ "$watcher_count" -eq 0 ]; then
   t_pass "no watcher spawned without a herdr socket"
 else
   t_fail "watcher should not spawn without a herdr socket (count: $watcher_count)"
 fi
 kill $pid 2>/dev/null
-pkill -f "status-watcher.sh" 2>/dev/null || true
+kill_test_watchers
+
+t_title "launch.sh: watcher cleanup is scoped to this repo"
+# The regression: cleanup used `pkill -f "status-watcher.sh"`, which also matches
+# the *installed* plugin's watcher, so every suite run killed the live freebuff
+# session's watcher on this machine. A decoy with the same basename under a
+# different path stands in for it, so the test needs no live plugin.
+mkdir -p "$FAKEHOME/decoy"
+printf '#!/bin/sh\nsleep 30\n' > "$FAKEHOME/decoy/status-watcher.sh"
+chmod +x "$FAKEHOME/decoy/status-watcher.sh"
+# Started from a subshell that exits immediately, so the decoy is reparented to
+# init rather than being a child of this test. A child would linger as a zombie
+# after `kill` and still answer `kill -0`, which would make the assertion below
+# pass no matter what the cleanup did.
+sh -c 'sh "$1" >/dev/null 2>&1 &' _ "$FAKEHOME/decoy/status-watcher.sh"
+sleep 0.5
+decoy=$(pgrep -f "$FAKEHOME/decoy/status-watcher.sh" 2>/dev/null | head -1)
+if [ -z "$decoy" ]; then
+  t_fail "setup: the decoy watcher did not start"
+else
+  # Precondition, so a pass cannot be vacuous: the old unscoped pattern really
+  # would have matched this decoy.
+  if pgrep -f "status-watcher.sh" 2>/dev/null | grep -qx "$decoy"; then
+    unscoped="unscoped pkill -f would match it"
+  else
+    unscoped="decoy not matched even unscoped (weak precondition)"
+  fi
+
+  kill_test_watchers
+  sleep 0.3
+
+  if kill -0 "$decoy" 2>/dev/null; then
+    t_pass "cleanup spares a watcher outside this repo ($unscoped)"
+  else
+    t_fail "cleanup killed an out-of-repo watcher, so the live plugin's watcher is never safe"
+  fi
+  kill "$decoy" 2>/dev/null
+fi
 
 t_title "launch.sh: unknown mode fails"
 output=$(HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" unknown 2>&1 || true)

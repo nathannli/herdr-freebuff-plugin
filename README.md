@@ -50,9 +50,9 @@ A fork of [TheMetalStorm/herdr-freebuff-plugin](https://github.com/TheMetalStorm
 | panes | task, resume-last, resume-named | task, resume-last |
 | startup hook | none | sweeps state, re-attaches watchers |
 | session restore | claimed, never worked | **struck through** — herdr supports it, freebuff exposes no resumable id |
-| test suites / assertions | 7 / 59 | 9 / 157 |
+| test suites / assertions | 7 / 59 | 9 / 158 |
 
-9 suites, 118 tests, 157 assertions, 0 failures on herdr 0.9.1.
+9 suites, 119 tests, 158 assertions, 0 failures on herdr 0.9.1.
 
 ## Features
 

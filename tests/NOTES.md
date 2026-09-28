@@ -191,6 +191,36 @@ An adopted pane has no launch floor, so it is spawned with floor `0` and waits
 for a writer-pid match before pinning. It reports `idle` until then, which
 self-heals the moment freebuff writes its first log line.
 
+## The test suite must not touch the live plugin
+`tests/launch.test.sh` used to `pkill -f "status-watcher.sh"` and to count
+watchers with `ps -ef | grep status-watcher.sh`. Both match by substring, so they
+also match the **installed** plugin's watcher, which runs out of
+`~/.config/herdr/plugins/github/freebuff.integration-*/scripts/`. Two consequences,
+both observed on this machine:
+
+- Every suite run killed the watcher for the real freebuff session running in
+  herdr. The sweep daemon re-attached a new one within 20s, so it looked like
+  the watcher had simply been restarted and nobody noticed.
+- That re-attached watcher was then counted by the *next* test, producing the
+  intermittent failure `watcher should not spawn outside herdr (count: 1)` —
+  visible only when a re-attach landed inside the test's 0.8s window. This is
+  where the "flaky test" hunt started; the flake was this, not a timing bug.
+
+Cleanup and counting are now scoped to `$PROJECT_ROOT`, which every watcher this
+repo spawns has in its command line and the installed one does not. That still
+cleans up after any suite in this repo, while leaving the live plugin alone.
+
+Measured, same machine, same session: the live watcher's pid went `22553 ->
+34887` across a single unfixed suite run, and stayed `34887 -> 34887` across a
+fixed one. Seven consecutive full runs after the fix left it untouched.
+
+The regression test spawns a decoy named `status-watcher.sh` under a *different*
+path, so it needs no live plugin. The decoy is deliberately started from a
+subshell that exits, so it is reparented to init instead of being a child of the
+test: a child lingers as a zombie after `kill` and still answers `kill -0`,
+which made the first version of this test pass against the broken cleanup. With
+that fixed, reverting the scoping fails it.
+
 ## A claim is on a freebuff, not on a pane
 `adopt-watches.sh` originally skipped any pane carrying an `adopted-` marker,
 which reads as sensible idempotence and is not. `prune_orphan_state` only clears

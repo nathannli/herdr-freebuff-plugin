@@ -207,7 +207,7 @@ file-based state is stale during exactly the windows that matter.
 |---|---|
 | `tests/common.test.sh` | 5 (`in_herdr`, `herdr_cmd`, `can_report`) |
 | `tests/e2e.test.sh` | 8 (full watcher lifecycle, source id, pin-hijack regression, release on exit) |
-| `tests/launch.test.sh` | 9 (modes, watcher spawn guards, error cases) |
+| `tests/launch.test.sh` | 10 (modes, watcher spawn guards, scoped cleanup, error cases) |
 | `tests/notify.test.sh` | 2 (sends notification, fails outside herdr) |
 | `tests/prune.test.sh` | 6 (orphan sweep, pane-id prefix safety, log pruning) |
 | `tests/attach.test.sh` | 21 (debounce gate, pid pinning, floor-gated fallback, pin re-validation, `pane_freebuff_pid` lookalikes, sweep scope, concurrent-sweep race, claim primitive) |
