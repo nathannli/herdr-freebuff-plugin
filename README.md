@@ -162,7 +162,7 @@ watcher intersects the two. No cooperation from freebuff is needed.
 Newest-by-mtime is the fallback only for a **brand-new** session, in the moment
 before its first log line exists, and only because the mtime floor `launch.sh`
 passes proves the directory was created after the pane launched. A floor of `0`
-— both resume modes, and every restart re-attach — gets no fallback at all.
+— `resume-last`, and every restart re-attach — gets no fallback at all.
 "Newest" cannot identify a resumed session, so those panes wait for a pid match
 and report `idle` until one appears. No pin is the correct answer there: a
 missing pin self-heals the moment freebuff writes its first log line, while a

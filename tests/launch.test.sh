@@ -50,20 +50,16 @@ else
   t_fail "resume-last mode did not start freebuff"
 fi
 
-t_title "launch.sh: resume-named passes session id"
-(
-  exec 2>/dev/null
-  HERDR_PANE_ID="pane-1" HERDR_ENV=1 HERDR_SOCKET_PATH="$FAKEHOME/herdr.sock" \
-    sh "$PROJECT_ROOT/scripts/launch.sh" resume-named "test-session-123" > /dev/null 2>&1
-) &
-pid=$!
-sleep 0.3
-if kill -0 $pid 2>/dev/null; then
-  t_pass "resume-named started freebuff with session id"
-  kill $pid 2>/dev/null
-else
-  t_fail "resume-named did not start freebuff"
-fi
+t_title "launch.sh: resume-named is not a mode"
+# It never had a caller, and it was actively dangerous to keep: it passed its
+# argument straight to `freebuff --continue`, which uses the value verbatim as a
+# chat *directory* name and, on a miss, silently falls back to the most recent
+# chat in the project. Handing it a `cli:<uuid>` instanceId, which is what its
+# "session id" wording invited, resumed the wrong conversation with no error.
+output=$(HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" resume-named "test-session-123" 2>&1 || true)
+echo "$output" | grep -q "unknown launch mode" \
+  && t_pass "resume-named is rejected as an unknown mode" \
+  || t_fail "resume-named still accepted a session id (got: $output)"
 
 # Cleanup leftover freebuff processes
 pkill -f "fake freebuff" 2>/dev/null || true
@@ -126,10 +122,6 @@ else
 fi
 kill $pid 2>/dev/null
 pkill -f "status-watcher.sh" 2>/dev/null || true
-
-t_title "launch.sh: resume-named fails without session id"
-output=$(HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" resume-named 2>&1 || true)
-echo "$output" | grep -q "requires a session id" && t_pass "resume-named rejects empty session id" || t_fail "resume-named should reject empty session id"
 
 t_title "launch.sh: unknown mode fails"
 output=$(HERDR_PANE_ID="pane-1" HERDR_ENV=1 sh "$PROJECT_ROOT/scripts/launch.sh" unknown 2>&1 || true)
