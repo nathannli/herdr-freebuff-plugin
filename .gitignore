@@ -24,3 +24,6 @@ HERDR_CALL_LOG*
 
 # graphify knowledge-graph output (local analysis cache)
 graphify-out/
+
+# freebuff per-project runtime state (created when freebuff runs in this repo)
+.freebuff/
