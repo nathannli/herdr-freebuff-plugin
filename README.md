@@ -268,7 +268,7 @@ file, and `FREEBUFF_SWEEP_INTERVAL` (default `20`) sets the sweep period.
 The startup hook runs once per server. A freebuff you start ten minutes later
 would never be claimed, and herdr 0.9.1 offers no way to hook pane creation: no
 cron, no scheduler, no `events.subscribe`. So `scripts/sweep-daemon.sh` polls,
-running prune → attach → adopt every 20s. Exactly one daemon runs: it claims
+running attach → adopt every 20s. Exactly one daemon runs: it claims
 `sweep-daemon.pid` with an exclusive create, and a claim held by a live process
 makes every other starter back off. A dead holder's claim is reclaimed, so a
 daemon killed with its server comes back on the next startup hook.
@@ -365,7 +365,7 @@ against a dead server would never attempt a report, and so would never notice.
 | `scripts/notify.sh` | Sends a herdr notification |
 | `scripts/prune-state.sh` | Startup hook; attach + adopt, then starts the sweep daemon |
 | `scripts/adopt-watches.sh` | Claims panes running a freebuff the user started by hand |
-| `scripts/sweep-daemon.sh` | Polls prune → attach → adopt so later panes are claimed too |
+| `scripts/sweep-daemon.sh` | Polls attach → adopt so later panes are claimed too |
 | `tests/` | Test suite: 9 suites |
 
 ## Notes

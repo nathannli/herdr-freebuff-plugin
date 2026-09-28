@@ -227,6 +227,17 @@ long-lived by design, and a test that starts one has to tear it down by pid,
 which is the same fragile pattern the suite avoids elsewhere. Its single-instance
 claim and kill switch were verified by hand against a live server.
 
+The daemon's loop runs `attach-watches.sh` then `adopt-watches.sh`, and must not
+run `prune-state.sh`. That is not a style preference. `prune-state.sh` is the
+startup hook, and the hook starts a daemon, so a daemon invoking it spawns a
+competing daemon on every pass — each one to find the claim held and exit again.
+It also runs attach and adopt itself, so the old three-line loop did both jobs
+twice. Caught live, as a daemon-spawned `prune-state.sh` with its own
+`attach-watches.sh` child. Pruning is not lost: `attach-watches.sh` calls
+`prune_orphan_state` on its first line. No test pins this, because the only honest
+test starts a real daemon; keep the comment in `sweep-daemon.sh` if the loop is
+ever touched.
+
 ## What `freebuff --continue` actually accepts
 `--continue [conversation-id]` is the only resume surface freebuff 0.1.2 exposes.
 The question that mattered was whether the `cli:<uuid>` `instanceId` from

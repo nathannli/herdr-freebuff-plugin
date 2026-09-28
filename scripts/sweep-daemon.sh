@@ -9,10 +9,14 @@
 # One daemon, guarded by an exclusive-create claim. Several startup hooks can
 # race to start it and exactly one wins, the same way the watcher claims a pane.
 #
-# Runs three sweeps on a slow interval:
-#   prune_orphan_state  - state for panes herdr no longer lists
-#   attach-watches.sh   - re-attach watchers to plugin-launched panes
-#   adopt-watches.sh    - adopt manually started freebuff panes
+# One pass is what the startup hook does, minus starting a daemon:
+#   attach-watches.sh  - prune state for dead panes, re-attach watchers
+#   adopt-watches.sh   - adopt manually started freebuff panes
+#
+# It deliberately does not call prune-state.sh, which is the hook. The hook
+# starts a daemon, so a daemon calling it would spawn a competing daemon on
+# every pass, each to find the claim held and exit again. It also does not run
+# attach and adopt on top of prune-state.sh, which already does both.
 #
 # Interval is deliberately long. Adoption only needs to catch a pane within a
 # few seconds of the user starting it, and each pass costs a `pane list` plus one
@@ -55,7 +59,6 @@ log "sweep daemon start pid=$$ interval=${INTERVAL}s"
 while :; do
   # Each sweep is independent and never fatal: one failing must not take the
   # daemon down, or every later sweep is lost until the next server restart.
-  sh "${HERDR_PLUGIN_ROOT}/scripts/prune-state.sh" >/dev/null 2>&1 || true
   sh "${HERDR_PLUGIN_ROOT}/scripts/attach-watches.sh" >/dev/null 2>&1 || true
   sh "${HERDR_PLUGIN_ROOT}/scripts/adopt-watches.sh" >/dev/null 2>&1 || true
   log "sweep pass done"
