@@ -151,8 +151,9 @@ bookkeeping over claims that already exist.
 The startup hook runs once per server, so a freebuff started later would never be
 adopted. herdr 0.9.1 exposes no cron, no scheduler, and no `events.subscribe`, so
 pane creation cannot be hooked at all — polling is the only option.
-`scripts/sweep-daemon.sh` runs prune → attach → adopt every
-`FREEBUFF_SWEEP_INTERVAL` seconds (default 20). One daemon runs: it claims
+`scripts/sweep-daemon.sh` runs attach → adopt every
+`FREEBUFF_SWEEP_INTERVAL` seconds (default 20); pruning rides along inside
+`attach-watches.sh`. One daemon runs: it claims
 `sweep-daemon.pid` with `set -C`, and a claim held by a live process makes every
 other starter exit. A dead holder's claim is reclaimed, so a daemon killed with
 its server returns on the next startup hook.
@@ -198,7 +199,7 @@ file-based state is stale during exactly the windows that matter.
 | `scripts/prune-state.sh` | Startup hook; attach + adopt, then starts the sweep daemon |
 | `scripts/attach-watches.sh` | Re-attaches watchers to every claimed (`owned-`/`adopted-`) pane |
 | `scripts/adopt-watches.sh` | Claims panes running a freebuff the user started by hand |
-| `scripts/sweep-daemon.sh` | Polls prune → attach → adopt so later panes are claimed too |
+| `scripts/sweep-daemon.sh` | Polls attach → adopt so later panes are claimed too |
 | `scripts/common.sh` also owns `prune_orphan_state`, `live_pane_ids` | Sweeps state for dead panes and logs older than a day |
 
 ### Tests (9 suites, all passing)
