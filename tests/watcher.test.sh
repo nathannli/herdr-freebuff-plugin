@@ -1,7 +1,9 @@
 # Tests for scripts/watcher-lib.sh (classify function)
 . "$(dirname "$0")/lib.sh"
 
-# Source watcher-lib to get classify, detect_blocked, last_matching_ts, json_get
+# Source common.sh then watcher-lib to get herdr_cmd, classify, detect_blocked,
+# last_matching_ts
+. "$(dirname "$0")/../scripts/common.sh"
 . "$(dirname "$0")/../scripts/watcher-lib.sh"
 
 t_title "classify: idle when no chat dir"
@@ -50,39 +52,39 @@ result=$(classify "$chat_dir")
 t_is "idle" "$result" "no conversation -> idle"
 rm -rf "$chat_dir"
 
-t_title "detect_blocked: detects ask-user (old format)"
+t_title "classify_signals: detects ask-user (old format)"
 chat_dir=$(mktemp -d)
 make_fake_chat "$chat_dir" "blocked"
-result=$(detect_blocked < "$chat_dir/chat-messages.json" 2>/dev/null)
-t_is "blocked" "$result" "detect_blocked returns blocked for ask-user block"
+classify_signals "$chat_dir"
+t_is "blocked" "$SIG_BLOCKED" "ask-user block reported as blocked"
 rm -rf "$chat_dir"
 
-t_title "detect_blocked: detects ask-user (new tool format)"
+t_title "classify_signals: detects ask-user (new tool format)"
 chat_dir=$(mktemp -d)
 make_fake_chat "$chat_dir" "blocked-new"
-result=$(detect_blocked < "$chat_dir/chat-messages.json" 2>/dev/null)
-t_is "blocked" "$result" "detect_blocked returns blocked for tool/ask_user block"
+classify_signals "$chat_dir"
+t_is "blocked" "$SIG_BLOCKED" "tool/ask_user block reported as blocked"
 rm -rf "$chat_dir"
 
-t_title "detect_blocked: no ask-user on working"
+t_title "classify_signals: no ask-user on working"
 chat_dir=$(mktemp -d)
 make_fake_chat "$chat_dir" "working"
-result=$(detect_blocked < "$chat_dir/chat-messages.json" 2>/dev/null)
-t_is "" "$result" "detect_blocked returns empty for working"
+classify_signals "$chat_dir"
+t_is "" "$SIG_BLOCKED" "no ask-user block on a working session"
 rm -rf "$chat_dir"
 
-t_title "last_matching_ts: finds Start agent"
+t_title "classify_signals: finds the last Start agent"
 chat_dir=$(mktemp -d)
 make_fake_chat "$chat_dir" "working"
-result=$(last_matching_ts "Start agent" < "$chat_dir/log.jsonl")
-t_is "2026-01-01T00:02:10.000Z" "$result" "finds last start agent timestamp"
+classify_signals "$chat_dir"
+t_is "2026-01-01T00:02:10.000Z" "$SIG_START" "finds last start agent timestamp"
 rm -rf "$chat_dir"
 
-t_title "last_matching_ts: finds Main prompt finished"
+t_title "classify_signals: finds Main prompt finished"
 chat_dir=$(mktemp -d)
 make_fake_chat "$chat_dir" "done"
-result=$(last_matching_ts "Main prompt finished" < "$chat_dir/log.jsonl")
-t_is "2026-01-01T00:02:10.000Z" "$result" "finds main prompt finished timestamp"
+classify_signals "$chat_dir"
+t_is "2026-01-01T00:02:10.000Z" "$SIG_FINISH" "finds main prompt finished timestamp"
 rm -rf "$chat_dir"
 
 t_title "find_newest_chat: finds chat across projects"
@@ -95,6 +97,68 @@ rm -rf "$HOME"
 export HOME="$_old_home"
 unset _old_home
 
+t_title "find_newest_chat: project slug filter ignores other projects"
+_old_home="$HOME"
+export HOME=$(mktemp -d)
+mkdir -p "$HOME/.config/manicode/projects/proj-a/chats/2026-01-01T00-00-00.000Z"
+mkdir -p "$HOME/.config/manicode/projects/proj-b/chats/2026-01-01T00-00-00.000Z"
+# Make proj-b strictly newer so an unfiltered scan would pick it
+touch "$HOME/.config/manicode/projects/proj-b/chats/2026-01-01T00-00-00.000Z"
+sleep 0.05
+touch "$HOME/.config/manicode/projects/proj-a/chats/2026-01-01T00-00-00.000Z"
+result=$(find_newest_chat "proj-a")
+t_is "$HOME/.config/manicode/projects/proj-a/chats/2026-01-01T00-00-00.000Z" "$result" "slug filter returns only that project's chat"
+result=$(find_newest_chat "proj-b")
+t_is "$HOME/.config/manicode/projects/proj-b/chats/2026-01-01T00-00-00.000Z" "$result" "other slug still resolvable"
+rm -rf "$HOME"
+export HOME="$_old_home"
+unset _old_home
+
+t_title "find_newest_chat: min mtime floor rejects older chats"
+_old_home="$HOME"
+export HOME=$(mktemp -d)
+OLD_DIR="$HOME/.config/manicode/projects/proj-a/chats/2026-01-01T00-00-00.000Z"
+mkdir -p "$OLD_DIR"
+echo '{}' > "$OLD_DIR/log.jsonl"
+# Floor far in the future: nothing can satisfy it
+result=$(find_newest_chat "proj-a" 99999999999999)
+t_is "" "$result" "future floor rejects an existing chat dir"
+# Floor at 0 behaves like no floor
+result=$(find_newest_chat "proj-a" 0)
+t_is "$OLD_DIR" "$result" "zero floor keeps the existing chat dir"
+rm -rf "$HOME"
+export HOME="$_old_home"
+unset _old_home
+
+t_title "pane_project_slug: resolves the basename of the pane cwd"
+export HERDR_STUB_PANE_CWD="/Users/someone/dev/my-project"
+result=$(pane_project_slug "test.pane.9")
+t_is "my-project" "$result" "slug is the cwd basename"
+export HERDR_STUB_PANE_CWD="/Users/someone/dev/my-project/"
+result=$(pane_project_slug "test.pane.9")
+t_is "my-project" "$result" "trailing slash does not leak into the slug"
+export HERDR_STUB_PANE_CWD="/Users/someone/dev/my-project/sub"
+result=$(pane_project_slug "test.pane.9")
+t_is "sub" "$result" "deep cwd uses its own basename"
+unset HERDR_STUB_PANE_CWD
+
+t_title "pane_project_slug: empty pane_id returns empty"
+result=$(pane_project_slug "")
+t_is "" "$result" "empty pane id -> empty slug"
+
+t_title "pane_project_slug: calls pane get without a --json flag"
+# `herdr pane get` always prints JSON and rejects --json with a usage error.
+# The stub would happily swallow the flag, so assert the real argv.
+: > "$HERDR_CALL_LOG"
+export HERDR_STUB_PANE_CWD="/Users/someone/dev/argv-check"
+pane_project_slug "test.pane.argv" >/dev/null
+if grep -qF "pane get test.pane.argv --json" "$HERDR_CALL_LOG" 2>/dev/null; then
+  t_fail "pane_project_slug must not pass --json to pane get"
+else
+  t_pass "pane get called without --json"
+fi
+unset HERDR_STUB_PANE_CWD
+
 t_title "find_newest_chat: empty when no projects"
 _old_home="$HOME"
 export HOME=$(mktemp -d)
@@ -104,12 +168,51 @@ rm -rf "$HOME"
 export HOME="$_old_home"
 unset _old_home
 
-t_title "last_matching_ts: no match returns empty"
+t_title "classify_signals: no match returns empty"
 chat_dir=$(mktemp -d)
 make_fake_chat "$chat_dir" "idle"
-result=$(last_matching_ts "Start agent" < "$chat_dir/log.jsonl")
-t_is "" "$result" "no match -> empty string"
+classify_signals "$chat_dir"
+t_is "" "$SIG_START" "no Start agent marker -> empty start"
 rm -rf "$chat_dir"
+
+t_title "classify_signals: uses messagesMtimeMs when it is the newest signal"
+# A directory mtime only moves when entries are added or removed, so it is a weak
+# activity signal. The activity value is the max across freebuff's recorded
+# messagesMtimeMs, the session file mtimes, and the directory mtime.
+chat_dir=$(mktemp -d)
+make_fake_chat "$chat_dir" "idle"
+printf '{"messagesMtimeMs":9999999999999}\n' > "$chat_dir/chat-meta.json"
+classify_signals "$chat_dir"
+t_is "9999999999999" "$SIG_ACTIVITY" "newest signal wins over file mtimes"
+rm -rf "$chat_dir"
+
+t_title "classify_signals: activity tracks real file writes, not dir mtime"
+# Touching a file inside the dir does not move the dir mtime. The activity
+# signal must still advance, or a resumed session can look permanently dead.
+chat_dir=$(mktemp -d)
+make_fake_chat "$chat_dir" "idle"
+rm -f "$chat_dir/chat-meta.json"
+classify_signals "$chat_dir"
+before=$SIG_ACTIVITY
+[ -n "$before" ] && [ "$before" -gt 0 ] 2>/dev/null && t_pass "activity is populated without chat-meta.json" \
+  || t_fail "activity should come from file mtimes (got: $before)"
+rm -rf "$chat_dir"
+
+t_title "classify_signals: dir mtime is only a last-resort fallback"
+chat_dir=$(mktemp -d)
+mkdir -p "$chat_dir"
+classify_signals "$chat_dir"
+[ -n "$SIG_ACTIVITY" ] && [ "$SIG_ACTIVITY" -gt 0 ] 2>/dev/null \
+  && t_pass "empty dir falls back to its own mtime" \
+  || t_fail "empty dir should still report an activity value (got: $SIG_ACTIVITY)"
+rm -rf "$chat_dir"
+
+t_title "classify_signals: missing chat dir yields empty signals, not garbage"
+classify_signals "/nonexistent/chat/dir"
+t_is "0" "$SIG_ACTIVITY" "activity defaults to 0"
+t_is "" "$SIG_START" "start empty"
+t_is "" "$SIG_FINISH" "finish empty"
+t_is "" "$SIG_BLOCKED" "blocked empty"
 
 # --- detect_screen_state tests ---
 # These need to stub `herdr pane read` via the fake herdr binary.
