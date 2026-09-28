@@ -9,11 +9,10 @@
 # freebuff's own pid after the exec below, so the watcher can track freebuff's
 # lifetime with a plain kill -0 poll. No PATH shim and no baked absolute path.
 #
-# Usage: launch.sh <task|resume-last|resume-named> [session-id]
+# Usage: launch.sh <task|resume-last>
 . "$(dirname "$0")/common.sh"
 
 mode="${1:-task}"
-name="${2:-}"
 
 # Spawn the lifecycle watcher for this pane, if herdr can receive reports.
 # Runs before the exec so the watcher exists for the whole session.
@@ -74,14 +73,6 @@ case "$mode" in
   resume-last)
     spawn_watcher 0
     exec "$FREEBUFF_BIN" --continue
-    ;;
-  resume-named)
-    if [ -z "$name" ]; then
-      echo "resume-named requires a session id" >&2
-      exit 1
-    fi
-    spawn_watcher 0
-    exec "$FREEBUFF_BIN" --continue "$name"
     ;;
   *)
     echo "unknown launch mode: $mode" >&2

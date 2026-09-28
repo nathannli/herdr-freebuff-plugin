@@ -80,8 +80,8 @@ herdr hiccup — or a `pane process-info` that returns nothing while the pane is
 busy — would unpin a correct pin. The re-check runs on a slow cadence rather
 than every poll because each one is a herdr call.
 
-The mtime fallback is gated on a non-zero floor. `resume-last`, `resume-named`,
-and every restart re-attach all pass `0`, and "newest dir" cannot identify a
+The mtime fallback is gated on a non-zero floor. `resume-last` and every
+restart re-attach all pass `0`, and "newest dir" cannot identify a
 resumed session, so those panes must wait for a pid match rather than risk
 another session's state. The test for this asserts the fallback returns *empty*
 with floor `0`; the "falls back to newest" case now needs a real floor.
@@ -226,6 +226,44 @@ Note that the daemon is not covered by an automated test of its own: it is
 long-lived by design, and a test that starts one has to tear it down by pid,
 which is the same fragile pattern the suite avoids elsewhere. Its single-instance
 claim and kill switch were verified by hand against a live server.
+
+## What `freebuff --continue` actually accepts
+`--continue [conversation-id]` is the only resume surface freebuff 0.1.2 exposes.
+The question that mattered was whether the `cli:<uuid>` `instanceId` from
+`~/.config/manicode/freebuff-live-<pid>.json` could be handed to it, which would
+have made `--agent-session-id` worth reporting. It cannot. The resolver in the
+binary is:
+
+```js
+let J = join(bV(), "chats"), H = join(J, T.trim());
+if (existsSync(H) && statSync(H).isDirectory()) A = H;
+else RA.debug({candidateDir: H, chatId: T},
+  "Requested chatId directory not found, falling back to most recent chat directory");
+```
+
+with `bV()` = `join(configDir, "projects", basename(projectRoot))`. Three
+consequences, none of them visible from `--help`:
+
+- The id is used **verbatim as a directory name**, so the conversation id is the
+  chat directory name (`2026-09-27T16-47-17.277Z`) — which is what freebuff
+  itself prints on exit. There is no `cli:${...}` template literal in the binary.
+- **A miss is silent.** It falls back to the most recent chat in the project at
+  debug log level, with no user-visible error. A plausible-looking wrong value
+  resumes the wrong conversation.
+- **It is project-scoped.** Only `projects/<basename(cwd)>/chats/` is searched, so
+  resuming requires the same cwd basename.
+
+This is why the undeclared `resume-named` launch mode was deleted rather than
+documented. It passed its argument straight to `--continue` and its error message
+called that argument a "session id", which is precisely the value a reader would
+have pulled from `freebuff-live-<pid>.json` — and that paste resumes the wrong
+chat without complaint. The launch suite now asserts `resume-named` is rejected
+as an unknown mode. Keep that assertion if the mode ever comes back: any
+replacement needs to validate the directory exists and fail loudly.
+
+Also settled here: freebuff has no `--agent-session-id` and no
+`resume_agents_on_restore`, so herdr has no session identity to restore from. The
+`idle`-before-pin window on a resumed pane is not closable from the plugin side.
 
 ## A pane's PATH is not a shell's PATH
 Herdr panes are spawned by the herdr *server*, not by your shell, and that server

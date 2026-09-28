@@ -54,10 +54,10 @@ Supporting layers, in order of how much they matter:
    session passes `0`, because it legitimately reuses a dir created earlier.
    Compared at second resolution, since `stat` only resolves whole seconds.
 
-A floor of `0` disables the newest-by-mtime fallback entirely. `resume-last`,
-`resume-named`, and every restart re-attach all pass `0`, and "newest" cannot
-identify a resumed session: an idle session stops touching its dir, so a
-concurrently active session in the same project is newer. Those panes report
+A floor of `0` disables the newest-by-mtime fallback entirely. `resume-last` and
+every restart re-attach all pass `0`, and "newest" cannot identify a resumed
+session: an idle session stops touching its dir, so a concurrently active
+session in the same project is newer. Those panes report
 `idle` until a pid match appears. That is the right trade, because a missing pin
 self-heals the moment freebuff writes its first log line whereas a wrong pin
 reports another session's state indefinitely.
@@ -206,7 +206,7 @@ file-based state is stale during exactly the windows that matter.
 |---|---|
 | `tests/common.test.sh` | 5 (`in_herdr`, `herdr_cmd`, `can_report`) |
 | `tests/e2e.test.sh` | 8 (full watcher lifecycle, source id, pin-hijack regression, release on exit) |
-| `tests/launch.test.sh` | 8 (modes, watcher spawn guards, error cases) |
+| `tests/launch.test.sh` | 9 (modes, watcher spawn guards, error cases) |
 | `tests/notify.test.sh` | 2 (sends notification, fails outside herdr) |
 | `tests/prune.test.sh` | 6 (orphan sweep, pane-id prefix safety, log pruning) |
 | `tests/attach.test.sh` | 21 (debounce gate, pid pinning, floor-gated fallback, pin re-validation, `pane_freebuff_pid` lookalikes, sweep scope, concurrent-sweep race, claim primitive) |
@@ -269,15 +269,23 @@ All were confirmed against a live herdr 0.9.1 server, not inferred.
   so an unusual freebuff install that resolves to none of the known prefixes
   stays `unknown` rather than being adopted on a guess. `FREEBUFF_BIN_PATH`
   overrides the resolved set.
-- **A resumed pane can sit at `idle` before it pins.** `resume-last` and
-  `resume-named` pass a floor of `0`, which disables the newest-by-mtime
+- **A resumed pane can sit at `idle` before it pins.** `resume-last` and every
+  restart re-attach pass a floor of `0`, which disables the newest-by-mtime
   fallback, because "newest" cannot identify a resumed session and a wrong pin
   is worse than none. The pane reports `idle` until freebuff writes a log line
-  carrying its pid, which is immediate in practice but is a real window. Closing
-  it entirely needs freebuff to expose its session id on the command line.
+  carrying its pid, which is immediate in practice but is a real window.
 - **No native session identity is reported**, so herdr cannot auto-resume a
-  freebuff pane after a server restart. `resume_agents_on_restore` has nothing
-  to resume from until the plugin reports `--agent-session-id`.
+  freebuff pane after a server restart, and `resume_agents_on_restore` has
+  nothing to resume from: freebuff 0.1.2 has no `--agent-session-id`, and the
+  only session-shaped id on disk is the `cli:<uuid>` `instanceId` in
+  `~/.config/manicode/freebuff-live-<pid>.json`, which `--continue` never reads.
+  `--continue <id>` uses the value verbatim as a directory name under
+  `~/.config/manicode/projects/<basename(cwd)>/chats/`, so the id is a chat
+  directory name scoped to the project slug, not a session id — and on a miss it
+  logs at debug level and silently resumes the most recent chat in that project.
+  A plausible-looking wrong value therefore resumes the wrong conversation with
+  no error. The undeclared `resume-named` launch mode, which passed such a value
+  straight through while calling it a "session id", was removed.
 - **A watcher that loses herdr gives up rather than retrying forever.** It counts
   consecutive `report-agent` failures, logs them unconditionally, and exits at
   `FREEBUFF_REPORT_FAILURE_LIMIT` (default 5) so the startup hook re-attaches it
