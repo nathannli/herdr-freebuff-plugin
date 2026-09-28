@@ -2,9 +2,56 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+**Version 0.2.0** · requires herdr >= 0.9.1 · Linux and macOS
+
 Makes [Freebuff](https://freebuff.com) a first-class agent inside [Herdr](https://herdr.dev), the terminal workspace manager for coding agents.
 
 **Lifecycle state** (`idle` / `working` / `blocked`) is reported to the herdr pane automatically — no manual status commands. Freebuff has no hook system, so the plugin polls freebuff's per-chat files on disk and supplements that with herdr's pane `detection` buffer for the transient UI states freebuff never flushes.
+
+## What changed in 0.2.0
+
+A fork of [TheMetalStorm/herdr-freebuff-plugin](https://github.com/TheMetalStorm/herdr-freebuff-plugin), whose last release was 0.1.0. Read this first if you are upgrading: **0.1.0 does not work on herdr 0.9.1**, so the version you are replacing was not reporting state at all.
+
+### 0.1.0 was broken on herdr 0.9.1
+
+- The reported contract no longer matched the API, and a PATH shim installed at `~/.local/bin/freebuff` pointed at a stale plugin path. The shim shadowed the real `freebuff` binary while failing silently, so every session reported nothing.
+- The documented keybinding used `type = "plugin_pane"`, a key type herdr 0.9.1 does not have — `reload-config` rejects it.
+- A herdr server restart killed every watcher, leaving surviving panes reporting nothing and herdr forgetting their display names. There was no startup hook to repair that afterwards.
+- A freebuff you started by hand was never watched at all.
+
+### Reporting, rewritten for the herdr 0.9.1 API
+
+- Report and release with `--source custom:freebuff`, `release-agent` on exit, a strictly increasing `--seq` in the plugin state dir, and pane reads via `--source` detection.
+- **The PATH shim is gone.** `scripts/common.sh` appends the well-known install prefixes instead, so `freebuff`, `node` and `herdr` all resolve from a pane the server spawned with launchd's default `PATH`. See [PATH in a herdr pane](#path-in-a-herdr-pane).
+- **Chat-dir pinning.** 0.1.0 re-resolved the newest chat directory on every poll, so an unrelated session in the same project could keep an idle pane reporting `working`. One directory is now pinned per pane by writer pid, the newest-by-mtime fallback is gated on a non-zero launch floor, and the pin is re-checked on a slow cadence. See [Session pinning](#session-pinning).
+- **One watcher per pane.** Overlapping sweeps could each attach a watcher to the same pane. The watcher now claims its pane with an atomic create, and the losers exit without reporting.
+- **Failures are loud.** A watcher counts consecutive `report-agent` failures, logs them unconditionally, and exits at a limit so the startup hook re-attaches it against the current server. A watcher that just kept polling would sit on a dead socket and a stale sequence counter indefinitely.
+
+### New
+
+- **Manual panes are adopted.** A freebuff you started by hand is detected and watched like a plugin-launched one, instead of showing `unknown` forever. Detection matches resolved freebuff binary paths and never the substring `freebuff`, so `vim freebuff-notes.md` is not adopted. A claim lasts exactly as long as its freebuff, so the same pane can be adopted again later. Opt out globally with `no-adopt` or per pane with `no-adopt-<pane_id>`.
+- **A sweep daemon.** herdr 0.9.1 exposes no cron, no scheduler and no `events.subscribe`, so pane creation cannot be hooked at all. One daemon polls every 20s so a freebuff started later is still claimed.
+- **A startup hook.** On server start and after a restore, state for closed panes is swept and watchers are re-attached to surviving panes.
+- **Pane state survives a restart.** The change users notice most: a restart no longer leaves live panes stuck on a stale `working` dot, or forgets their display name.
+
+### Removed
+
+- The `resume-named` launch mode. It passed its argument straight to `freebuff --continue`, which uses the value as a chat *directory* name and, on a miss, silently resumes the most recent chat in the project instead. Its "session id" wording invited exactly the wrong value, so it is gone rather than documented. Use `resume-last`.
+- Windows support: `platforms` is now `linux` and `macos`. The scripts are POSIX `sh`.
+- The `setup` action, and the two test suites that covered the old shim and setup behaviour.
+
+### At a glance
+
+| | 0.1.0 | 0.2.0 |
+|---|---|---|
+| plugin version | 0.1.0 | 0.2.0 |
+| `min_herdr_version` | 0.7.0 | 0.9.1 |
+| `platforms` | linux, macos, windows | linux, macos |
+| panes | task, resume-last, resume-named | task, resume-last |
+| startup hook | none | sweeps state, re-attaches watchers |
+| test suites / assertions | 7 / 59 | 9 / 157 |
+
+9 suites, 118 tests, 157 assertions, 0 failures on herdr 0.9.1.
 
 ## Features
 
