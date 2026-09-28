@@ -162,6 +162,42 @@ prune_orphan_state
 
 teardown_adopt
 
+# --- a claim must not outlive the freebuff it was made for ---
+
+t_title "adopt-watches: a stale claim does not block re-adoption"
+# The regression found live on w1Z:p1. The pane was adopted once, its freebuff
+# exited, and the `adopted-` marker stayed: prune_orphan_state only clears state
+# for panes herdr no longer lists, so a live pane kept the marker forever. Every
+# later sweep skipped the pane on that marker, so a freebuff started there again
+# was never adopted and the pane reported `agent_status: unknown` permanently.
+setup_adopt
+sh "$PROJECT_ROOT/scripts/adopt-watches.sh" >/dev/null 2>&1
+sleep 1
+[ -f "$ADOPT_STATE/adopted-w1:p1" ] || t_fail "setup: nothing was adopted"
+
+# The freebuff exits; the pane stays open, running a plain shell.
+export HERDR_STUB_PANE_PROCS="${ADOPT_FB}:/bin/zsh"
+sh "$PROJECT_ROOT/scripts/adopt-watches.sh" >/dev/null 2>&1
+sleep 1
+[ -f "$ADOPT_STATE/adopted-w1:p1" ] \
+  && t_fail "a claim on an exited freebuff was kept, so the pane can never be adopted again" \
+  || t_pass "the claim is dropped once the freebuff is gone"
+
+# The user starts another freebuff in the same pane. Its watcher is gone too,
+# the way a herdr restart leaves it: the old watcher was watching a dead pid.
+kill -9 "$(tr -dc '0-9' < "$ADOPT_STATE/watch-w1:p1.pid" 2>/dev/null)" 2>/dev/null || true
+sleep 1
+export HERDR_STUB_PANE_PROCS="${ADOPT_FB}:${ADOPT_REAL_FB}"
+sh "$PROJECT_ROOT/scripts/adopt-watches.sh" >/dev/null 2>&1
+sleep 1
+re_adopted=$(tr -dc '0-9' < "$ADOPT_STATE/watch-w1:p1.pid" 2>/dev/null)
+if [ -f "$ADOPT_STATE/adopted-w1:p1" ] && [ -n "$re_adopted" ] && kill -0 "$re_adopted" 2>/dev/null; then
+  t_pass "a new freebuff in the same pane is adopted and watched"
+else
+  t_fail "a pane adopted once can never be adopted again, so it reports unknown forever"
+fi
+teardown_adopt
+
 # --- a dead watcher on an adopted pane must be re-attached ---
 
 t_title "attach-watches: re-attaches a watcher killed on an adopted pane"

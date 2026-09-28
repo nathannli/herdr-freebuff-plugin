@@ -23,9 +23,16 @@
 #      leave a stale state dot behind, which is worse than a live watcher on a pane
 #      the user no longer wants adopted.
 #
-# Adoption happens exactly once per pane. Keeping an existing claim's watcher
-# alive is attach-watches.sh's job, not this script's, so a pane carrying an
-# `adopted-` marker is skipped here even when its watcher is gone.
+# A claim lasts exactly as long as the freebuff it was made for. An
+# `adopted-<pane_id>` marker on a pane with no freebuff in it is a claim on a
+# process that has exited, so it is dropped and the pane becomes adoptable
+# again. Tying the marker to the pane instead left a live pane that could never
+# be adopted a second time: a freebuff started there later reported
+# `agent_status: unknown` forever, which is the exact trap adoption exists to
+# avoid. Seen live on a pane whose freebuff had exited.
+#
+# Keeping an existing claim's watcher alive is attach-watches.sh's job, not this
+# script's, so a pane with a live watcher is skipped here.
 #
 # The watcher claims the pane for itself with an atomic create, so overlapping
 # sweeps cannot produce two watchers on one pane.
@@ -48,11 +55,29 @@ panes=$(live_pane_ids)
 
 adopted=0
 for pane_id in $panes; do
-  # Already ours, already adopted, or explicitly excluded by a per-pane
-  # no-adopt marker. Never touch those twice.
+  # Already ours, or explicitly excluded by a per-pane no-adopt marker. An
+  # opted-out pane keeps its marker untouched: opting out is the user's call,
+  # not ours to clean up.
   [ -f "${STATE_DIR}/owned-${pane_id}" ] && continue
-  [ -f "${STATE_DIR}/adopted-${pane_id}" ] && continue
   [ -f "${STATE_DIR}/no-adopt-${pane_id}" ] && continue
+
+  # Detection comes before the pidfile check on purpose. Whether a claim is
+  # still valid depends on the freebuff, not on the watcher, so the freebuff has
+  # to be resolved first or a stale claim would outlive the process it names.
+  freebuff_pid=$(pane_freebuff_pid "$pane_id")
+  if [ -z "$freebuff_pid" ]; then
+    # The freebuff this pane was adopted for has exited, so the claim is void.
+    # Dropping it is what lets a freebuff started here later be adopted; the
+    # marker is rewritten below the moment a freebuff is actually present.
+    rm -f "${STATE_DIR}/adopted-${pane_id}" 2>/dev/null
+    continue
+  fi
+
+  # A freebuff in the pane is what makes the claim true, so record it here,
+  # before the pidfile check below. Skipping straight past a pane that already
+  # has a live watcher would leave the marker missing, and a missing marker is
+  # what attach-watches.sh reads to decide a pane is still claimed.
+  : > "${STATE_DIR}/adopted-${pane_id}" 2>/dev/null
 
   # Cheap pre-check only. The watcher's own atomic claim is what actually
   # decides; this just avoids spawning a watcher that would instantly exit.
@@ -62,14 +87,6 @@ for pane_id in $panes; do
       continue
     fi
   fi
-
-  freebuff_pid=$(pane_freebuff_pid "$pane_id")
-  [ -n "$freebuff_pid" ] || continue
-
-  # Mark before spawning, not after. If this sweep dies between the two, the
-  # marker still says "adopted" and the pane keeps its watcher, rather than
-  # being adopted again on the next pass.
-  : > "${STATE_DIR}/adopted-${pane_id}" 2>/dev/null
 
   # Floor 0: pid-only pinning, no newest-by-mtime fallback. See note 2 above.
   sh "${HERDR_PLUGIN_ROOT}/scripts/status-watcher.sh" \

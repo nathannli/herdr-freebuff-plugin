@@ -227,10 +227,14 @@ substring `freebuff` would adopt `vim freebuff-notes.md` or
 `grep -r freebuff` and paint a state dot onto an unrelated session. The plugin's
 own scripts are explicitly excluded.
 
-**Adoption happens once; attachment is separate.** The claim is recorded in
+**A claim lasts as long as the freebuff, not the pane.** The claim is recorded in
 `adopted-<pane_id>` before the watcher is spawned, and keeping that watcher alive
-is `attach-watches.sh`'s job. Adoption is the one-way decision to write herdr
-state into a pane you own, so it is never made twice or undone silently.
+is `attach-watches.sh`'s job. Adoption itself is never made twice while a
+freebuff is running there. When that freebuff exits, the marker is dropped, so a
+freebuff you start in the same pane later is adopted normally. Tying the marker to
+the pane instead left a live pane that could never be adopted a second time,
+which is the same permanent `unknown` adoption exists to prevent; that was
+observed live before the fix.
 
 **Pinning is pid-only for adopted panes.** An adopted pane has no launch floor,
 so there is no mtime to prove a chat dir belongs to it, and "newest dir" cannot
