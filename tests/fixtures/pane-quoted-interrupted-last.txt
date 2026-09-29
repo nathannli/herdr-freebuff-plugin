@@ -1,0 +1,16 @@
+   [08:20 PM]
+   check how the watcher handles interruption
+
+  • Thinking
+    The user wants me to inspect the transcript. Let me grep the chat log.
+
+  12s
+  Reading file tests/NOTES.md...
+
+  • some older turn ended with [response interrupted] marker text
+    quoted inside tool output while the turn is still live
+
+  • Thinking
+    Analyzing the quoted marker from the transcript dump...
+
+ MiniMax M3 · 54m left                  

@@ -232,10 +232,26 @@ result=$(detect_screen_state "test.pane.4")
 t_is "interrupted" "$result" "[response interrupted] detected via screen content"
 
 t_title "detect_screen_state: returns answered for 'Your answer:' + box"
+# The fixture also carries a live Thinking line below the echo (the new turn
+# starts right after the answer). Bottom-most wins at detection level, and
+# thinking and a boxed answer both mean working — classify lands on working
+# either way (asserted below).
 HERDR_STUB_PANE_CONTENT_test_pane_5="$PROJECT_ROOT/tests/fixtures/pane-answer-chosen.txt" \
   export HERDR_STUB_PANE_CONTENT_test_pane_5
 result=$(detect_screen_state "test.pane.5")
-t_is "answered" "$result" "'Your answer:' with boxed answer detected via screen content"
+t_is "thinking" "$result" "echo above live Thinking: bottom-most marker wins, both mean working"
+
+t_title "detect_screen_state: boxed answer with no Thinking below is answered"
+# Truncate the fixture to the boxed answer plus one blank line so the echo
+# itself is the bottom-most transient marker (the second Thinking line below
+# the box is the next turn, not part of this one).
+_fixture_dir=$(mktemp -d)
+sed -n '1,/^╰/p' "$PROJECT_ROOT/tests/fixtures/pane-answer-chosen.txt" > "$_fixture_dir/echo-only.txt"
+HERDR_STUB_PANE_CONTENT_test_pane_5="$_fixture_dir/echo-only.txt" \
+  export HERDR_STUB_PANE_CONTENT_test_pane_5
+result=$(detect_screen_state "test.pane.5")
+t_is "answered" "$result" "'Your answer:' box as the bottom-most marker -> answered"
+rm -rf "$_fixture_dir"
 
 t_title "detect_screen_state: returns thinking for suggest_followups"
 HERDR_STUB_PANE_CONTENT_test_pane_2="$PROJECT_ROOT/tests/fixtures/pane-suggest-followups.txt" \
@@ -385,7 +401,76 @@ result=$(classify "$chat_dir" "test.pane.6")
 t_is "idle" "$result" "no screen signals + idle timeline -> idle (timeline fallback)"
 rm -rf "$chat_dir"
 
+# --- quoted-marker regressions ---
+# A mid-turn agent PRINTS old markers (reading its own chat log, grepping a
+# transcript, cat-ing this repo's tests). Flat marker precedence ranked the
+# quoted stale marker above the live heartbeat and reported idle mid-turn,
+# which fired herdr's agent-done notification while the session was working.
+
+t_title "detect_screen_state: quoted [response interrupted] loses to live Thinking below it"
+HERDR_STUB_PANE_CONTENT_test_pane_7="$PROJECT_ROOT/tests/fixtures/pane-quoted-interrupted-last.txt" \
+  export HERDR_STUB_PANE_CONTENT_test_pane_7
+result=$(detect_screen_state "test.pane.7")
+t_is "thinking" "$result" "bottom-most marker wins: quoted interrupted is history, Thinking is live"
+
+t_title "detect_screen_state: quoted 'Your answer:' without box is not answered"
+HERDR_STUB_PANE_CONTENT_test_pane_8="$PROJECT_ROOT/tests/fixtures/pane-quoted-answer-no-box.txt" \
+  export HERDR_STUB_PANE_CONTENT_test_pane_8
+result=$(detect_screen_state "test.pane.8")
+t_is "thinking" "$result" "answer echo requires its confirmation box; bare text is history"
+
+t_title "detect_screen_state: genuine interruption (marker bottom-most, no Thinking) still detected"
+HERDR_STUB_PANE_CONTENT_test_pane_9="$PROJECT_ROOT/tests/fixtures/pane-interrupted-bare-last.txt" \
+  export HERDR_STUB_PANE_CONTENT_test_pane_9
+result=$(detect_screen_state "test.pane.9")
+t_is "interrupted" "$result" "real Esc leaves [response interrupted] as the bottom-most marker"
+
+t_title "classify: working files + quoted interrupted + Thinking on screen -> working"
+# The exact production symptom: timeline says working, screen shows a quoted
+# interrupted marker above the live heartbeat. Must stay working.
+chat_dir=$(mktemp -d)
+make_fake_chat "$chat_dir" "working"
+HERDR_STUB_PANE_CONTENT_test_pane_7="$PROJECT_ROOT/tests/fixtures/pane-quoted-interrupted-last.txt" \
+  export HERDR_STUB_PANE_CONTENT_test_pane_7
+result=$(classify "$chat_dir" "test.pane.7")
+t_is "working" "$result" "quoted interrupted must not flip a working session to idle"
+rm -rf "$chat_dir"
+
+t_title "classify: working files + bare interrupted (no Thinking) -> idle after recheck"
+# Real Esc: the marker stays bottom-most across the re-read because the screen
+# is static, so the confirm pass upholds the idle verdict.
+chat_dir=$(mktemp -d)
+make_fake_chat "$chat_dir" "working"
+HERDR_STUB_PANE_CONTENT_test_pane_9="$PROJECT_ROOT/tests/fixtures/pane-interrupted-bare-last.txt" \
+  export HERDR_STUB_PANE_CONTENT_test_pane_9
+result=$(classify "$chat_dir" "test.pane.9")
+t_is "idle" "$result" "genuine interruption of a working session still lands idle"
+rm -rf "$chat_dir"
+
+t_title "classify: idle files + bare interrupted -> idle without recheck"
+chat_dir=$(mktemp -d)
+make_fake_chat "$chat_dir" "idle"
+HERDR_STUB_PANE_CONTENT_test_pane_9="$PROJECT_ROOT/tests/fixtures/pane-interrupted-bare-last.txt" \
+  export HERDR_STUB_PANE_CONTENT_test_pane_9
+result=$(classify "$chat_dir" "test.pane.9")
+t_is "idle" "$result" "interrupted against an idle timeline needs no confirmation"
+rm -rf "$chat_dir"
+
+t_title "classify: file=blocked + quoted answer without box -> files decide"
+# The echo lost its box (quoted text), so it is history. The live Thinking
+# heartbeat below it wins, and a thinking screen against blocked files means
+# the new turn already started -> working (same contract as pane=thinking).
+chat_dir=$(mktemp -d)
+make_fake_chat "$chat_dir" "blocked"
+HERDR_STUB_PANE_CONTENT_test_pane_8="$PROJECT_ROOT/tests/fixtures/pane-quoted-answer-no-box.txt" \
+  export HERDR_STUB_PANE_CONTENT_test_pane_8
+result=$(classify "$chat_dir" "test.pane.8")
+t_is "working" "$result" "quoted answer is history; live Thinking means the turn is running"
+rm -rf "$chat_dir"
+
 unset HERDR_STUB_PANE_CONTENT_test_pane_1 HERDR_STUB_PANE_CONTENT_test_pane_2 \
   HERDR_STUB_PANE_CONTENT_test_pane_3 HERDR_STUB_PANE_CONTENT_test_pane_4 \
-  HERDR_STUB_PANE_CONTENT_test_pane_5 HERDR_STUB_PANE_CONTENT_test_pane_6
+  HERDR_STUB_PANE_CONTENT_test_pane_5 HERDR_STUB_PANE_CONTENT_test_pane_6 \
+  HERDR_STUB_PANE_CONTENT_test_pane_7 HERDR_STUB_PANE_CONTENT_test_pane_8 \
+  HERDR_STUB_PANE_CONTENT_test_pane_9
 unset HERDR_BIN_PATH
