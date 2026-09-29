@@ -390,6 +390,19 @@ chat_dir_still_ours() {
 # followed within <=2 lines by a bordered box around the chosen answer.
 # After Esc, freebuff prints "[response interrupted]" directly.
 #
+# Markers are compared by position, not by fixed precedence. The tail of the
+# buffer includes scrollback, and an agent mid-turn routinely PRINTS old
+# markers: reading its own chat log, grepping a transcript, or cat-ing this
+# repo's tests all put a literal "[response interrupted]" or "Your answer:"
+# above the live "• Thinking" heartbeat. A flat precedence ranked the quoted
+# stale marker above the live one and reported idle mid-turn, which fires
+# herdr's agent-done notification while the session is still working. The
+# bottom-most marker is the live one; everything above it is history.
+#
+# The popup stays an absolute override: it is a TUI overlay pinned to the
+# bottom of the screen while live, and its hint strings are implausible as
+# tool output.
+#
 # Argument: pane_id. Echoes one of:
 #   blocked | interrupted | answered | thinking | ""
 # Always returns 0 so callers under `set -e` cannot abort on a read failure.
@@ -403,28 +416,38 @@ detect_screen_state() {
   # newline matters: grep -A2 cannot see past the last line without one.
   _tail=$(printf '%s\n' "$_content" | tail -n "$SCREEN_TAIL_LINES")
 
-  # 1. Live popup — highest precedence
+  # 1. Live popup — absolute override
   printf '%s\n' "$_tail" | grep -qE "Enter select|↑↓ navigate" && { printf blocked; return; }
 
-  # 2. Response interrupted (Esc) — chat files are still stale at this point
-  printf '%s\n' "$_tail" | grep -qF '[response interrupted]' && { printf interrupted; return; }
+  # Bottom-most line number of each transient marker (0 = absent).
+  # Argument: ERE pattern. Reads $_tail.
+  _marker_line() {
+    _n=$(printf '%s\n' "$_tail" | grep -nE "$1" 2>/dev/null | tail -n 1 | cut -d: -f1)
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+    printf '%s' "$_n"
+  }
 
-  # 3. Answer just chosen — "Your answer:" followed within <=2 lines by
-  #    a bordered box. The box is a strong signal that the answer-echo was
-  #    rendered and the popup was dismissed.
-  if printf '%s\n' "$_tail" | grep -A2 'Your answer:' | grep -qE '[╭│╰└┌]'; then
-    printf answered
-    return
+  _int_line=$(_marker_line '\[response interrupted\]')
+  _ans_line=$(_marker_line 'Your answer:')
+  _thk_line=$(_marker_line '• Thinking|Thinking\.\.\.|Working\.\.\.')
+
+  # 2. Answer echo only counts with its confirmation box within <=2 lines.
+  #    The bare "Your answer:" text can be quoted (or paraphrased) mid-turn;
+  #    the bordered box is what proves the popup was just dismissed.
+  if [ "$_ans_line" -gt 0 ]; then
+    _box=$(printf '%s\n' "$_tail" | sed -n "${_ans_line},$((_ans_line + 2))p" | grep -cE '[╭│╰└┌]')
+    [ "$_box" -gt 0 ] || _ans_line=0
   fi
 
-  # 4. AI processing heartbeat — "• Thinking", "Thinking...", or "Working..."
-  #     on screen. These persist for the entire duration of AI processing,
-  #     bridging the gap between the "Your answer:" box scrolling off and
-  #     file-based classification catching up (next Main prompt finished).
-  #     The bullet "•" is Unicode U+2022.
-  printf '%s\n' "$_tail" | grep -qE '• Thinking|Thinking\.\.\.|Working\.\.\.' && { printf thinking; return; }
+  # 3. Bottom-most marker wins; ties are impossible (distinct lines).
+  _sig=""
+  _max=0
+  if [ "$_thk_line" -gt "$_max" ]; then _max=$_thk_line; _sig=thinking; fi
+  if [ "$_int_line" -gt "$_max" ]; then _max=$_int_line; _sig=interrupted; fi
+  if [ "$_ans_line" -gt "$_max" ]; then _sig=answered; fi
+  [ -n "$_sig" ] && { printf '%s' "$_sig"; return; }
 
-  # 5. No signal
+  # 4. No signal
   return 0
 }
 
@@ -500,15 +523,27 @@ should_report_state() {
 
 # Classify freebuff's current state.
 #
-# When pane_id is available, the visible screen content is authoritative:
+# When pane_id is available, the visible screen content leads:
 #   - ask_user popup visible  → blocked
-#   - answer echo / thinking heartbeat on screen → working
-#   - [response interrupted] on screen → idle
+#   - thinking heartbeat on screen → working
+#   - [response interrupted] on screen → idle, but confirmed before it can
+#     override a working timeline (see below)
+#   - answer echo on screen → working only while the files still claim a live
+#     popup; anywhere else the echo is history and the files are fresher
 #   - no screen signal → use timeline from log files (stale blocked is ignored
 #     since the popup is visually absent)
 #
 # Without pane_id, falls back to full file-based detection (including the
 # ask_user block check from chat-messages.json).
+#
+# Why interrupted is confirmed: the buffer tail includes scrollback, and a
+# mid-turn agent PRINTS old markers (reading logs, grepping transcripts). If
+# a big tool dump pushes the thinking heartbeat out of the tail, a quoted
+# "[response interrupted]" can be the bottom-most transient marker while the
+# timeline still says working. A real Esc leaves the screen static; output in
+# flight moves the marker or brings the heartbeat back within a moment. So a
+# screen=interrupted verdict against a working timeline is re-checked once
+# after a short delay before it is believed.
 classify() {
   _chat_dir="$1"
   _pane_id="${2:-}"
@@ -516,18 +551,35 @@ classify() {
   if [ -n "$_pane_id" ]; then
     _sig=$(detect_screen_state "$_pane_id")
 
-    # Screen signals are authoritative
     case "$_sig" in
       blocked)
         printf blocked
         return
         ;;
-      interrupted)
-        printf idle
+      thinking)
+        printf working
         return
         ;;
-      answered|thinking)
-        printf working
+      interrupted)
+        if [ "$(_classify_timeline "$_chat_dir")" != working ]; then
+          printf idle
+          return
+        fi
+        sleep "${FREEBUFF_INTERRUPT_RECHECK_SECS:-1.2}" 2>/dev/null || sleep 1
+        if [ "$(detect_screen_state "$_pane_id")" = interrupted ]; then
+          printf idle
+        else
+          _classify_timeline "$_chat_dir"
+        fi
+        return
+        ;;
+      answered)
+        _files=$(_classify_files "$_chat_dir")
+        if [ "$_files" = blocked ]; then
+          printf working
+        else
+          printf '%s' "$_files"
+        fi
         return
         ;;
       "")
